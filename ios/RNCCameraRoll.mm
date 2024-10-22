@@ -178,20 +178,30 @@ RCT_EXPORT_METHOD(saveToCameraRoll:(NSURLRequest *)request
         if ([[inputURI.pathExtension lowercaseString] isEqualToString:@"webp"]) {
           UIImage *webpImage;
 
-          #ifdef SD_WEB_IMAGE_WEBP_CODER_AVAILABLE 
+          #ifdef SD_WEB_IMAGE_WEBP_CODER_AVAILABLE
             webpImage = [[SDImageWebPCoder sharedCoder] decodedImageWithData:data options:nil];
           #else
             if (@available(iOS 14, *)) {
               webpImage = [UIImage imageWithData:data];
             }
           #endif
-          
+
           if (webpImage) {
             data = UIImageJPEGRepresentation(webpImage, 1.0);
           }
         }
-        UIImage *image = [UIImage imageWithData:data];
-        assetRequest = [PHAssetChangeRequest creationRequestForAssetFromImage:image];
+
+        // 设置标题
+        PHAssetCreationRequest *creationRequest = [PHAssetCreationRequest creationRequestForAsset];
+        PHAssetResourceCreationOptions *createOptions = [[PHAssetResourceCreationOptions alloc] init];
+        if(![options[@"title"] isEqualToString:@""]){
+            createOptions.originalFilename = options[@"title"];
+        }
+        [creationRequest addResourceWithType:PHAssetResourceTypePhoto data:data options:createOptions];
+        assetRequest = creationRequest;
+
+//         UIImage *image = [UIImage imageWithData:data];
+//         assetRequest = [PHAssetChangeRequest creationRequestForAssetFromImage:image];
       }
       placeholder = [assetRequest placeholderForCreatedAsset];
       if (![options[@"album"] isEqualToString:@""]) {
@@ -433,7 +443,7 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
       NSArray<NSString*> *const assetMediaSubtypesLabel = [self mediaSubTypeLabelsForAsset:asset];
 
       NSArray<NSString*> *albums = @[];
-      
+
       if (includeAlbums) {
         albums = [self getAlbumsForAsset:asset];
       }
@@ -726,15 +736,15 @@ RCT_EXPORT_METHOD(getPhotoThumbnail:(NSString *)internalId
     checkPhotoLibraryConfig();
 
     BOOL const allowNetworkAccess = options[@"allowNetworkAccess"] == nil ? NO : [RCTConvert BOOL:options[@"allowNetworkAccess"]];
-    
+
     NSDictionary *const targetSize = [RCTConvert NSDictionary:options[@"targetSize"]];
     CGFloat const targetHeight = targetSize[@"height"] == nil ? 400 : [RCTConvert CGFloat:targetSize[@"height"]];
     CGFloat const targetWidth = targetSize[@"width"] == nil ? 400 : [RCTConvert CGFloat:targetSize[@"width"]];
-    
+
     CGFloat quality = options[@"quality"] == nil ? 1.0 : [RCTConvert CGFloat:options[@"quality"]];
 
     requestPhotoLibraryAccess(reject, ^(bool isLimited){
-    
+
         PHFetchResult<PHAsset *> *fetchResult;
         PHAsset *asset;
         NSString *mediaIdentifier = internalId;
@@ -754,7 +764,7 @@ RCT_EXPORT_METHOD(getPhotoThumbnail:(NSString *)internalId
             requestOptions.networkAccessAllowed = allowNetworkAccess;
             requestOptions.version = PHImageRequestOptionsVersionUnadjusted;
             requestOptions.deliveryMode = PHImageRequestOptionsDeliveryModeHighQualityFormat;
-            
+
             CGSize const thumbnailSize = CGSizeMake(targetWidth, targetHeight);
             [[PHImageManager defaultManager] requestImageForAsset:asset
                                                        targetSize:thumbnailSize
@@ -766,9 +776,9 @@ RCT_EXPORT_METHOD(getPhotoThumbnail:(NSString *)internalId
                 if (error) {
                     reject(@"Error while getting thumbnail image",@"Error while getting thumbnail image",error);
                 }
-                
+
                 NSString *thumbnailBase64 = [UIImageJPEGRepresentation(image, quality) base64EncodedStringWithOptions:NSDataBase64EncodingEndLineWithLineFeed];
-                
+
                 resolve(@{
                     @"thumbnailBase64": thumbnailBase64
                 });
@@ -784,7 +794,7 @@ RCT_EXPORT_METHOD(getPhotoThumbnail:(NSString *)internalId
 
 NSString *subTypeLabelForCollection(PHAssetCollection *assetCollection) {
     PHAssetCollectionSubtype subtype = assetCollection.assetCollectionSubtype;
-  
+
     switch (subtype) {
         case PHAssetCollectionSubtypeAlbumRegular:
             return @"AlbumRegular";
@@ -799,7 +809,7 @@ NSString *subTypeLabelForCollection(PHAssetCollection *assetCollection) {
       case PHAssetCollectionSubtypeAlbumMyPhotoStream:
           return @"AlbumMyPhotoStream";
       case PHAssetCollectionSubtypeAlbumCloudShared:
-          return @"AlbumCloudShared";      
+          return @"AlbumCloudShared";
       default:
           return @"Unknown";
   }
@@ -808,7 +818,7 @@ NSString *subTypeLabelForCollection(PHAssetCollection *assetCollection) {
 - (NSArray<NSString *> *) mediaSubTypeLabelsForAsset:(PHAsset *)asset {
     PHAssetMediaSubtype subtype = asset.mediaSubtypes;
     NSMutableArray<NSString*> *mediaSubTypeLabels = [NSMutableArray array];
-    
+
     if (subtype & PHAssetMediaSubtypePhotoPanorama) {
         [mediaSubTypeLabels addObject:@"PhotoPanorama"];
     }
