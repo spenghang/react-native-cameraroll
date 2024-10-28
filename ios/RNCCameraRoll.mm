@@ -359,9 +359,9 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
     //   will be set to true below inside of `collectAsset`
     // - If the user set `first: 10` and there are 10 photos, `hasNextPage`
     //   will not be set, as expected
-    assetFetchOptions.fetchLimit = first + 1;
+//     assetFetchOptions.fetchLimit = first + 1;
   }
-  assetFetchOptions.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"creationDate" ascending:NO]];
+//   assetFetchOptions.sortDescriptors = @[[NSSortDescriptor sortDescriptorWithKey:@"creationDate" ascending:NO]];
 
   if (includeSharedAlbums) {
     assetFetchOptions.includeAssetSourceTypes = PHAssetSourceTypeUserLibrary | PHAssetSourceTypeCloudShared;
@@ -489,7 +489,7 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
 
     if ([groupTypes isEqualToString:@"all"]) {
       PHFetchResult <PHAsset *> *const assetFetchResult = [PHAsset fetchAssetsWithOptions: assetFetchOptions];
-      [assetFetchResult enumerateObjectsUsingBlock:collectAsset];
+      [assetFetchResult enumerateObjectsWithOptions:NSEnumerationReverse usingBlock:collectAsset];
     } else {
       PHFetchResult<PHAssetCollection *> * assetCollectionFetchResult;
       if ([groupTypes isEqualToString:@"smartalbum"]) {
@@ -497,7 +497,7 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
         [assetCollectionFetchResult enumerateObjectsUsingBlock:^(PHAssetCollection * _Nonnull assetCollection, NSUInteger collectionIdx, BOOL * _Nonnull stopCollections) {
           if ([assetCollection.localizedTitle isEqualToString:groupName]) {
             PHFetchResult<PHAsset *> *const assetsFetchResult = [PHAsset fetchAssetsInAssetCollection:assetCollection options:assetFetchOptions];
-            [assetsFetchResult enumerateObjectsUsingBlock:collectAsset];
+            [assetsFetchResult enumerateObjectsWithOptions:NSEnumerationReverse usingBlock:collectAsset];
             *stopCollections = stopCollections_;
           }
         }];
@@ -514,7 +514,7 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
         [assetCollectionFetchResult enumerateObjectsUsingBlock:^(PHAssetCollection * _Nonnull assetCollection, NSUInteger collectionIdx, BOOL * _Nonnull stopCollections) {
             // Enumerate assets within the collection
           PHFetchResult<PHAsset *> *const assetsFetchResult = [PHAsset fetchAssetsInAssetCollection:assetCollection options:assetFetchOptions];
-          [assetsFetchResult enumerateObjectsUsingBlock:collectAsset];
+          [assetsFetchResult enumerateObjectsWithOptions:NSEnumerationReverse usingBlock:collectAsset];
           *stopCollections = stopCollections_;
         }];
       }
