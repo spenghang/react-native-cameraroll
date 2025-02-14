@@ -134,6 +134,7 @@ export type PhotoIdentifier = {
       filepath: string | null;
       extension: string | null;
       uri: string;
+      thumbUri?: string;
       height: number;
       width: number;
       fileSize: number | null;

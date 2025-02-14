@@ -268,16 +268,23 @@ RCT_EXPORT_METHOD(getAlbums:(NSDictionary *)params
   NSString *__block fetchedAlbumType = nil;
   void (^convertAsset)(PHAssetCollection * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) =
     ^(PHAssetCollection * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
-      PHFetchOptions *const assetFetchOptions = [RCTConvert PHFetchOptionsFromMediaType:mediaType fromTime:0 toTime:0];
-      // Enumerate assets within the collection
-      PHFetchResult<PHAsset *> *const assetsFetchResult = [PHAsset fetchAssetsInAssetCollection:obj options:assetFetchOptions];
-      if (assetsFetchResult.count > 0) {
+
+//      PHFetchOptions *const assetFetchOptions = [RCTConvert PHFetchOptionsFromMediaType:mediaType fromTime:0 toTime:0];
+//      // Enumerate assets within the collection
+//      PHFetchResult<PHAsset *> *const assetsFetchResult = [PHAsset fetchAssetsInAssetCollection:obj options:assetFetchOptions];
+//      if (assetsFetchResult.count > 0) {
+//        [result addObject:@{
+//          @"title": [obj localizedTitle],
+//          @"count": @(assetsFetchResult.count),
+//          @"type": fetchedAlbumType
+//        }];
+//      }
+
         [result addObject:@{
           @"title": [obj localizedTitle],
-          @"count": @(assetsFetchResult.count),
+          @"count": @(0),
           @"type": fetchedAlbumType
         }];
-      }
     };
 
   PHFetchOptions* options = [[PHFetchOptions alloc] init];
@@ -375,117 +382,141 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
   BOOL __block stopCollections_;
 
   requestPhotoLibraryAccess(reject, ^(bool isLimited){
-    void (^collectAsset)(PHAsset*, NSUInteger, BOOL*) = ^(PHAsset * _Nonnull asset, NSUInteger assetIdx, BOOL * _Nonnull stopAssets) {
-      NSString *const uri = [NSString stringWithFormat:@"ph://%@", [asset localIdentifier]];
+      void (^collectAsset)(PHAsset*, NSUInteger, BOOL*) = ^(PHAsset * _Nonnull asset, NSUInteger assetIdx, BOOL * _Nonnull stopAssets) {
+          NSString *const uri = [NSString stringWithFormat:@"ph://%@", [asset localIdentifier]];
 
-      if (afterCursor && !foundAfter) {
-        if ([afterCursor isEqualToString:uri]) {
-          foundAfter = YES;
-        }
-        return;
-      }
-      NSString *_Nullable originalFilename = NULL;
-      NSString *_Nullable fileExtension = NULL;
-      PHAssetResource *_Nullable resource = NULL;
-      NSNumber* fileSize = [NSNumber numberWithInt:0];
+          if (afterCursor && !foundAfter) {
+              if ([afterCursor isEqualToString:uri]) {
+                  foundAfter = YES;
+              }
+              return;
+          }
+          NSString *_Nullable originalFilename = NULL;
+          NSString *_Nullable fileExtension = NULL;
+          PHAssetResource *_Nullable resource = NULL;
+          NSNumber* fileSize = [NSNumber numberWithInt:0];
 
-      if (includeFilename || includeFileSize || [mimeTypes count] > 0) {
-        // Get underlying resources of an asset - this includes files as well as details about edited PHAssets
-        // This is required for the filename and mimeType filtering
-        NSArray<PHAssetResource *> *const assetResources = [PHAssetResource assetResourcesForAsset:asset];
-        resource = [assetResources firstObject];
-        originalFilename = resource.originalFilename;
-        fileSize = [resource valueForKey:@"fileSize"];
-      }
+          if (includeFilename || includeFileSize || [mimeTypes count] > 0) {
+              // Get underlying resources of an asset - this includes files as well as details about edited PHAssets
+              // This is required for the filename and mimeType filtering
+              NSArray<PHAssetResource *> *const assetResources = [PHAssetResource assetResourcesForAsset:asset];
+              resource = [assetResources firstObject];
+              originalFilename = resource.originalFilename;
+              fileSize = [resource valueForKey:@"fileSize"];
+          }
 
-      // WARNING: If you add any code to `collectAsset` that may skip adding an
-      // asset to the `assets` output array, you should do it inside this
-      // block and ensure the logic for `collectAssetMayOmitAsset` above is
-      // updated
-      if (collectAssetMayOmitAsset) {
-        if ([mimeTypes count] > 0 && resource) {
-          CFStringRef const uti = (__bridge CFStringRef _Nonnull)(resource.uniformTypeIdentifier);
-          NSString *const mimeType = (NSString *)CFBridgingRelease(UTTypeCopyPreferredTagWithClass(uti, kUTTagClassMIMEType));
+          // WARNING: If you add any code to `collectAsset` that may skip adding an
+          // asset to the `assets` output array, you should do it inside this
+          // block and ensure the logic for `collectAssetMayOmitAsset` above is
+          // updated
+          if (collectAssetMayOmitAsset) {
+              if ([mimeTypes count] > 0 && resource) {
+                  CFStringRef const uti = (__bridge CFStringRef _Nonnull)(resource.uniformTypeIdentifier);
+                  NSString *const mimeType = (NSString *)CFBridgingRelease(UTTypeCopyPreferredTagWithClass(uti, kUTTagClassMIMEType));
 
-          BOOL __block mimeTypeFound = NO;
-          [mimeTypes enumerateObjectsUsingBlock:^(NSString * _Nonnull mimeTypeFilter, NSUInteger idx, BOOL * _Nonnull stop) {
-            if ([mimeType isEqualToString:mimeTypeFilter]) {
-              mimeTypeFound = YES;
-              *stop = YES;
-            }
+                  BOOL __block mimeTypeFound = NO;
+                  [mimeTypes enumerateObjectsUsingBlock:^(NSString * _Nonnull mimeTypeFilter, NSUInteger idx, BOOL * _Nonnull stop) {
+                      if ([mimeType isEqualToString:mimeTypeFilter]) {
+                          mimeTypeFound = YES;
+                          *stop = YES;
+                      }
+                  }];
+
+                  if (!mimeTypeFound) {
+                      return;
+                  }
+              }
+          }
+
+          // If we've accumulated enough results to resolve a single promise
+          if (first == assets.count) {
+              *stopAssets = YES;
+              stopCollections_ = YES;
+              hasNextPage = YES;
+              RCTAssert(resolvedPromise == NO, @"Resolved the promise before we finished processing the results.");
+              RCTResolvePromise(resolve, assets, hasNextPage, isLimited);
+              resolvedPromise = YES;
+              return;
+          }
+
+          NSString *const assetMediaTypeLabel = (asset.mediaType == PHAssetMediaTypeVideo
+                                                 ? @"video"
+                                                 : (asset.mediaType == PHAssetMediaTypeImage
+                                                    ? @"image"
+                                                    : (asset.mediaType == PHAssetMediaTypeAudio
+                                                       ? @"audio"
+                                                       : @"unknown")));
+
+          NSArray<NSString*> *const assetMediaSubtypesLabel = [self mediaSubTypeLabelsForAsset:asset];
+
+          NSArray<NSString*> *albums = @[];
+
+          if (includeAlbums) {
+              albums = [self getAlbumsForAsset:asset];
+          }
+
+          if (includeFileExtension) {
+              NSString *name = [asset valueForKey:@"filename"];
+              NSString *extension = [name pathExtension];
+              fileExtension = [extension lowercaseString];
+          }
+
+          CLLocation *const loc = asset.location;
+          NSString *localIdentifier = asset.localIdentifier;
+
+          // Request thumbnail
+          PHImageManager *imageManager = [PHImageManager defaultManager];
+          PHImageRequestOptions *options = [[PHImageRequestOptions alloc] init];
+          options.synchronous = YES;
+          options.resizeMode = PHImageRequestOptionsResizeModeFast;
+          options.deliveryMode = PHImageRequestOptionsDeliveryModeHighQualityFormat;
+          [imageManager requestImageForAsset:asset
+                                  targetSize:CGSizeMake(200, 200) // Set your desired thumbnail size
+                                 contentMode:PHImageContentModeAspectFill
+                                     options:options
+                               resultHandler:^(UIImage * _Nullable result, NSDictionary * _Nullable info) {
+
+              NSString *thumbnailPath;
+              if(result){
+                  // Save thumbnail to temporary directory
+                  NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+                  NSString *documentsDirectory = [paths objectAtIndex:0];
+                  thumbnailPath = [documentsDirectory stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.jpg", [[localIdentifier componentsSeparatedByString:@"/"] firstObject]]];
+                  NSData *imageData = UIImageJPEGRepresentation(result, 0.8);
+                  [imageData writeToFile:thumbnailPath atomically:YES];
+              }
+
+              [assets addObject:@{
+                @"node": @{
+                    @"id": localIdentifier,
+                    @"type": assetMediaTypeLabel, // TODO: switch to mimeType?
+                    @"subTypes": assetMediaSubtypesLabel,
+                    @"group_name": albums,
+                    @"image": @{
+                        @"uri": uri,
+                        @"thumbUri": thumbnailPath,
+                        @"extension": (includeFileExtension ? fileExtension : [NSNull null]),
+                        @"filename": (includeFilename && originalFilename ? originalFilename : [NSNull null]),
+                        @"height": (includeImageSize ? @([asset pixelHeight]) : [NSNull null]),
+                        @"width": (includeImageSize ? @([asset pixelWidth]) : [NSNull null]),
+                        @"fileSize": (includeFileSize && fileSize ? fileSize : [NSNull null]),
+                        @"playableDuration": (includePlayableDuration && asset.mediaType != PHAssetMediaTypeImage
+                            ? @([asset duration]) // fractional seconds
+                            : [NSNull null])
+                    },
+                    @"timestamp": @(asset.creationDate.timeIntervalSince1970),
+                    @"modificationTimestamp": @(asset.modificationDate.timeIntervalSince1970),
+                    @"location": (includeLocation && loc ? @{
+                        @"latitude": @(loc.coordinate.latitude),
+                        @"longitude": @(loc.coordinate.longitude),
+                        @"altitude": @(loc.altitude),
+                        @"heading": @(loc.course),
+                        @"speed": @(loc.speed), // speed in m/s
+                    } : [NSNull null])
+                }
+              }];
           }];
-
-          if (!mimeTypeFound) {
-            return;
-          }
-        }
-      }
-
-      // If we've accumulated enough results to resolve a single promise
-      if (first == assets.count) {
-        *stopAssets = YES;
-        stopCollections_ = YES;
-        hasNextPage = YES;
-        RCTAssert(resolvedPromise == NO, @"Resolved the promise before we finished processing the results.");
-        RCTResolvePromise(resolve, assets, hasNextPage, isLimited);
-        resolvedPromise = YES;
-        return;
-      }
-
-      NSString *const assetMediaTypeLabel = (asset.mediaType == PHAssetMediaTypeVideo
-                                            ? @"video"
-                                            : (asset.mediaType == PHAssetMediaTypeImage
-                                                ? @"image"
-                                                : (asset.mediaType == PHAssetMediaTypeAudio
-                                                  ? @"audio"
-                                                  : @"unknown")));
-
-      NSArray<NSString*> *const assetMediaSubtypesLabel = [self mediaSubTypeLabelsForAsset:asset];
-
-      NSArray<NSString*> *albums = @[];
-
-      if (includeAlbums) {
-        albums = [self getAlbumsForAsset:asset];
-      }
-
-      if (includeFileExtension) {
-        NSString *name = [asset valueForKey:@"filename"];
-        NSString *extension = [name pathExtension];
-        fileExtension = [extension lowercaseString];
-      }
-
-      CLLocation *const loc = asset.location;
-      NSString *localIdentifier = asset.localIdentifier;
-
-      [assets addObject:@{
-        @"node": @{
-          @"id": localIdentifier,
-          @"type": assetMediaTypeLabel, // TODO: switch to mimeType?
-          @"subTypes": assetMediaSubtypesLabel,
-          @"group_name": albums,
-          @"image": @{
-              @"uri": uri,
-              @"extension": (includeFileExtension ? fileExtension : [NSNull null]),
-              @"filename": (includeFilename && originalFilename ? originalFilename : [NSNull null]),
-              @"height": (includeImageSize ? @([asset pixelHeight]) : [NSNull null]),
-              @"width": (includeImageSize ? @([asset pixelWidth]) : [NSNull null]),
-              @"fileSize": (includeFileSize && fileSize ? fileSize : [NSNull null]),
-              @"playableDuration": (includePlayableDuration && asset.mediaType != PHAssetMediaTypeImage
-                                    ? @([asset duration]) // fractional seconds
-                                    : [NSNull null])
-          },
-          @"timestamp": @(asset.creationDate.timeIntervalSince1970),
-          @"modificationTimestamp": @(asset.modificationDate.timeIntervalSince1970),
-          @"location": (includeLocation && loc ? @{
-              @"latitude": @(loc.coordinate.latitude),
-              @"longitude": @(loc.coordinate.longitude),
-              @"altitude": @(loc.altitude),
-              @"heading": @(loc.course),
-              @"speed": @(loc.speed), // speed in m/s
-            } : [NSNull null])
-          }
-      }];
-    };
+      };
 
     if ([groupTypes isEqualToString:@"all"]) {
       PHFetchResult <PHAsset *> *const assetFetchResult = [PHAsset fetchAssetsWithOptions: assetFetchOptions];
