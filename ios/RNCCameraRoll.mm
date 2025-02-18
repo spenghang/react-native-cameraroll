@@ -471,7 +471,7 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
           options.resizeMode = PHImageRequestOptionsResizeModeFast;
           options.deliveryMode = PHImageRequestOptionsDeliveryModeHighQualityFormat;
           [imageManager requestImageForAsset:asset
-                                  targetSize:CGSizeMake(200, 200) // Set your desired thumbnail size
+                                  targetSize:CGSizeMake(360, 360) // Set your desired thumbnail size
                                  contentMode:PHImageContentModeAspectFill
                                      options:options
                                resultHandler:^(UIImage * _Nullable result, NSDictionary * _Nullable info) {
