@@ -476,14 +476,18 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
                                      options:options
                                resultHandler:^(UIImage * _Nullable result, NSDictionary * _Nullable info) {
 
-              NSString *thumbnailPath;
+              NSString *thumbnailPath = uri;
               if(result){
-                  // Save thumbnail to temporary directory
-                  NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-                  NSString *documentsDirectory = [paths objectAtIndex:0];
-                  thumbnailPath = [documentsDirectory stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.jpg", [[localIdentifier componentsSeparatedByString:@"/"] firstObject]]];
-                  NSData *imageData = UIImageJPEGRepresentation(result, 0.8);
-                  [imageData writeToFile:thumbnailPath atomically:YES];
+                  @try {
+                      // Save thumbnail to temporary directory
+                      NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+                      NSString *documentsDirectory = [paths objectAtIndex:0];
+                      thumbnailPath = [documentsDirectory stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.jpg", [[localIdentifier componentsSeparatedByString:@"/"] firstObject]]];
+                      NSData *imageData = UIImageJPEGRepresentation(result, 0.8);
+                      [imageData writeToFile:thumbnailPath atomically:YES];
+                  } @catch (NSException *exception) {
+                      NSLog(@"Error saving thumbnail: %@", exception);
+                  }
               }
 
               [assets addObject:@{
