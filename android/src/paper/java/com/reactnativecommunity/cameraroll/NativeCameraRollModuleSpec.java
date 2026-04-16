@@ -49,5 +49,9 @@ public abstract class NativeCameraRollModuleSpec extends ReactContextBaseJavaMod
 
   @ReactMethod
   @DoNotStrip
+  public abstract void getPhotoVideoURI(String internalID, Promise promise);
+
+  @ReactMethod
+  @DoNotStrip
   public abstract void getPhotoThumbnail(String internalID, ReadableMap options, Promise promise);
 }

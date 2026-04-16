@@ -763,6 +763,29 @@ RCT_EXPORT_METHOD(getPhotoByInternalID:(NSString *)internalId
   }, false);
 }
 
+RCT_EXPORT_METHOD(getPhotoVideoURI:(NSString *)internalId
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+  checkPhotoLibraryConfig();
+
+  requestPhotoLibraryAccess(reject, ^(bool isLimited){
+    PHAsset *asset = [self assetForInternalID:internalId];
+
+    if (asset) {
+      NSString *liveVideoURI = [self isLivePhotoAsset:asset] ? [self liveVideoURIForAsset:asset] : nil;
+      resolve(@{
+        @"liveVideoUri": (liveVideoURI ? liveVideoURI : [NSNull null])
+      });
+    } else {
+      NSString *errorMessage = [NSString stringWithFormat:@"Failed to load asset"
+                                " with localIdentifier %@ with no error message.", internalId];
+      NSError *error = RCTErrorWithMessage(errorMessage);
+      reject(@"No asset found",@"No asset found",error);
+    }
+  }, false);
+}
+
 RCT_EXPORT_METHOD(getPhotoThumbnail:(NSString *)internalId
                   options:(NSDictionary *)options
                   resolve:(RCTPromiseResolveBlock)resolve
@@ -848,6 +871,80 @@ NSString *subTypeLabelForCollection(PHAssetCollection *assetCollection) {
       default:
           return @"Unknown";
   }
+}
+
+- (PHAsset *)assetForInternalID:(NSString *)internalId {
+    NSString *mediaIdentifier = internalId;
+
+    if ([internalId rangeOfString:@"ph://"].location != NSNotFound) {
+        mediaIdentifier = [internalId stringByReplacingOccurrencesOfString:@"ph://"
+                                                                withString:@""];
+    }
+
+    PHFetchResult<PHAsset *> *fetchResult =
+      [PHAsset fetchAssetsWithLocalIdentifiers:@[mediaIdentifier] options:nil];
+    return fetchResult.firstObject;
+}
+
+- (BOOL)isLivePhotoAsset:(PHAsset *)asset {
+    return asset.mediaType == PHAssetMediaTypeImage &&
+      (asset.mediaSubtypes & PHAssetMediaSubtypePhotoLive) == PHAssetMediaSubtypePhotoLive;
+}
+
+- (NSString *)temporaryPathForAssetIdentifier:(NSString *)identifier
+                             originalFilename:(NSString *)originalFilename {
+    NSString *safeIdentifier = [[identifier stringByReplacingOccurrencesOfString:@"/" withString:@"_"]
+                                stringByReplacingOccurrencesOfString:@":" withString:@"_"];
+    NSString *filename = originalFilename.length > 0
+      ? [NSString stringWithFormat:@"%@-%@", safeIdentifier, originalFilename]
+      : [NSString stringWithFormat:@"%@.mov", safeIdentifier];
+    return [NSTemporaryDirectory() stringByAppendingPathComponent:filename];
+}
+
+- (NSString *)liveVideoURIForAsset:(PHAsset *)asset {
+    if (![self isLivePhotoAsset:asset]) {
+        return nil;
+    }
+
+    PHAssetResource *pairedVideoResource = nil;
+    for (PHAssetResource *resource in [PHAssetResource assetResourcesForAsset:asset]) {
+        if (resource.type == PHAssetResourceTypePairedVideo) {
+            pairedVideoResource = resource;
+            break;
+        }
+    }
+
+    if (pairedVideoResource == nil) {
+        return nil;
+    }
+
+    NSString *outputPath = [self temporaryPathForAssetIdentifier:asset.localIdentifier
+                                                originalFilename:pairedVideoResource.originalFilename];
+    NSURL *outputURL = [NSURL fileURLWithPath:outputPath];
+    [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
+
+    PHAssetResourceRequestOptions *requestOptions = [PHAssetResourceRequestOptions new];
+    requestOptions.networkAccessAllowed = YES;
+
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block NSError *writeError = nil;
+    [[PHAssetResourceManager defaultManager] writeDataForAssetResource:pairedVideoResource
+                                                                toFile:outputURL
+                                                               options:requestOptions
+                                                     completionHandler:^(NSError * _Nullable error) {
+        writeError = error;
+        dispatch_semaphore_signal(semaphore);
+    }];
+    dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+
+    if (writeError) {
+        RCTLogWarn(@"Failed to export Live Photo paired video for asset %@: %@",
+                   asset.localIdentifier,
+                   writeError.localizedDescription);
+        return nil;
+    }
+
+    return outputURL.absoluteString;
 }
 
 - (NSArray<NSString *> *) mediaSubTypeLabelsForAsset:(PHAsset *)asset {

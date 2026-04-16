@@ -50,12 +50,16 @@ import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.io.RandomAccessFile;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.HashMap;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.annotation.Nullable;
 
@@ -86,6 +90,15 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
   private static final String INCLUDE_PLAYABLE_DURATION = "playableDuration";
   private static final String INCLUDE_ORIENTATION = "orientation";
   private static final String INCLUDE_ALBUMS = "albums";
+  private static final String MOTION_PHOTO_CACHE_DIR = "rn-cameraroll-motion-photo";
+  private static final int MOTION_PHOTO_XMP_SCAN_BYTES = 512 * 1024;
+  private static final int MOTION_PHOTO_VIDEO_SCAN_BYTES = 16 * 1024 * 1024;
+  private static final Pattern MICRO_VIDEO_OFFSET_PATTERN =
+          Pattern.compile("(?:Camera|GCamera):MicroVideoOffset[^0-9]*(\\d+)");
+  private static final Pattern MOTION_PHOTO_LENGTH_PATTERN =
+          Pattern.compile("Item:Semantic=\"MotionPhoto\"[^>]*Item:Length=\"(\\d+)\"");
+  private static final Pattern MOTION_PHOTO_LENGTH_PATTERN_REVERSED =
+          Pattern.compile("Item:Length=\"(\\d+)\"[^>]*Item:Semantic=\"MotionPhoto\"");
 
   private static final String[] PROJECTION = {
           Images.Media._ID,
@@ -659,7 +672,8 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
           boolean includePlayableDuration,
           boolean includeOrientation) {
     WritableMap image = new WritableNativeMap();
-    Uri photoUri = Uri.parse("file://" + media.getString(dataIndex));
+    String filePath = media.getString(dataIndex);
+    Uri photoUri = Uri.parse("file://" + filePath);
     image.putString("uri", photoUri.toString());
     String mimeType = media.getString(mimeTypeIndex);
 
@@ -701,6 +715,263 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
 
     node.putMap("image", image);
     return putImageSizeSuccess && putPlayableDurationSuccess;
+  }
+
+  @ReactMethod
+  public void getPhotoVideoURI(String internalID, Promise promise) {
+    String filePath = resolveMediaPathFromInternalID(getReactApplicationContext(), internalID);
+    if (filePath == null) {
+      promise.reject(ERROR_UNABLE_TO_LOAD, "Could not find media for identifier: " + internalID);
+      return;
+    }
+
+    String mimeType = Utils.getMimeType(filePath);
+    @Nullable String liveVideoUri = extractMotionPhotoVideoUri(
+            getReactApplicationContext(),
+            filePath,
+            mimeType);
+
+    WritableMap response = new WritableNativeMap();
+    if (liveVideoUri != null) {
+      response.putString("liveVideoUri", liveVideoUri);
+    } else {
+      response.putNull("liveVideoUri");
+    }
+    promise.resolve(response);
+  }
+
+  @Nullable
+  private static String resolveMediaPathFromInternalID(Context context, String internalID) {
+    if (TextUtils.isEmpty(internalID)) {
+      return null;
+    }
+
+    if (internalID.startsWith("file://")) {
+      return Uri.parse(internalID).getPath();
+    }
+
+    File directFile = new File(internalID);
+    if (directFile.exists()) {
+      return directFile.getAbsolutePath();
+    }
+
+    ContentResolver resolver = context.getContentResolver();
+    Cursor cursor = null;
+    try {
+      cursor = resolver.query(
+              MediaStore.Files.getContentUri("external"),
+              new String[]{MediaStore.MediaColumns.DATA},
+              MediaStore.Files.FileColumns._ID + " = ?",
+              new String[]{internalID},
+              null);
+      if (cursor != null && cursor.moveToFirst()) {
+        int dataIndex = cursor.getColumnIndex(MediaStore.MediaColumns.DATA);
+        if (dataIndex >= 0) {
+          return cursor.getString(dataIndex);
+        }
+      }
+    } catch (SecurityException e) {
+      FLog.w(ReactConstants.TAG, "Could not resolve media path for identifier " + internalID, e);
+    } finally {
+      if (cursor != null) {
+        cursor.close();
+      }
+    }
+
+    return null;
+  }
+
+  @Nullable
+  private static String extractMotionPhotoVideoUri(
+          Context context,
+          String filePath,
+          @Nullable String mimeType) {
+    if (mimeType == null || !mimeType.startsWith("image")) {
+      return null;
+    }
+
+    File sourceFile = new File(filePath);
+    if (!sourceFile.exists() || !sourceFile.isFile()) {
+      return null;
+    }
+
+    String metadata = readMotionPhotoMetadata(sourceFile);
+    if (!containsMotionPhotoMarker(metadata)) {
+      return null;
+    }
+
+    long videoStartOffset = resolveMotionPhotoVideoStartOffset(sourceFile, metadata);
+    if (videoStartOffset <= 0 || videoStartOffset >= sourceFile.length()) {
+      return null;
+    }
+
+    File cacheDir = new File(context.getCacheDir(), MOTION_PHOTO_CACHE_DIR);
+    if (!cacheDir.exists() && !cacheDir.mkdirs()) {
+      return null;
+    }
+
+    File outputFile = buildMotionPhotoCacheFile(cacheDir, sourceFile);
+    long expectedLength = sourceFile.length() - videoStartOffset;
+    if (outputFile.exists() && outputFile.length() == expectedLength) {
+      return Uri.fromFile(outputFile).toString();
+    }
+
+    if (!writeMotionPhotoVideoFile(sourceFile, outputFile, videoStartOffset)) {
+      return null;
+    }
+
+    return Uri.fromFile(outputFile).toString();
+  }
+
+  private static boolean containsMotionPhotoMarker(String metadata) {
+    return metadata.contains("MotionPhoto")
+            || metadata.contains("MicroVideo")
+            || metadata.contains("MotionPhoto_Data");
+  }
+
+  private static String readMotionPhotoMetadata(File sourceFile) {
+    int bytesToRead = (int) Math.min(sourceFile.length(), MOTION_PHOTO_XMP_SCAN_BYTES);
+    if (bytesToRead <= 0) {
+      return "";
+    }
+
+    byte[] buffer = new byte[bytesToRead];
+    try (FileInputStream inputStream = new FileInputStream(sourceFile)) {
+      int bytesRead = inputStream.read(buffer);
+      if (bytesRead <= 0) {
+        return "";
+      }
+      return new String(buffer, 0, bytesRead, StandardCharsets.ISO_8859_1);
+    } catch (IOException e) {
+      FLog.w(ReactConstants.TAG, "Could not read Motion Photo metadata for " + sourceFile, e);
+      return "";
+    }
+  }
+
+  private static long resolveMotionPhotoVideoStartOffset(File sourceFile, String metadata) {
+    long fileLength = sourceFile.length();
+
+    long microVideoOffset = parseLongAttribute(metadata, MICRO_VIDEO_OFFSET_PATTERN);
+    if (microVideoOffset > 0 && microVideoOffset < fileLength) {
+      return fileLength - microVideoOffset;
+    }
+
+    long motionPhotoLength = parseLongAttribute(metadata, MOTION_PHOTO_LENGTH_PATTERN);
+    if (motionPhotoLength <= 0) {
+      motionPhotoLength = parseLongAttribute(metadata, MOTION_PHOTO_LENGTH_PATTERN_REVERSED);
+    }
+    if (motionPhotoLength > 0 && motionPhotoLength < fileLength) {
+      return fileLength - motionPhotoLength;
+    }
+
+    return findEmbeddedMp4StartOffset(sourceFile);
+  }
+
+  private static long parseLongAttribute(String value, Pattern pattern) {
+    Matcher matcher = pattern.matcher(value);
+    if (!matcher.find()) {
+      return -1;
+    }
+
+    try {
+      return Long.parseLong(matcher.group(1));
+    } catch (NumberFormatException e) {
+      return -1;
+    }
+  }
+
+  private static long findEmbeddedMp4StartOffset(File sourceFile) {
+    long fileLength = sourceFile.length();
+    long bytesToScan = Math.min(fileLength, MOTION_PHOTO_VIDEO_SCAN_BYTES);
+    if (bytesToScan <= 8) {
+      return -1;
+    }
+
+    byte[] buffer = new byte[(int) bytesToScan];
+    long scanStart = fileLength - bytesToScan;
+
+    try (RandomAccessFile randomAccessFile = new RandomAccessFile(sourceFile, "r")) {
+      randomAccessFile.seek(scanStart);
+      randomAccessFile.readFully(buffer);
+    } catch (IOException e) {
+      FLog.w(ReactConstants.TAG, "Could not scan Motion Photo video payload for " + sourceFile, e);
+      return -1;
+    }
+
+    for (int i = buffer.length - 8; i >= 4; i--) {
+      if (buffer[i] == 'f'
+              && buffer[i + 1] == 't'
+              && buffer[i + 2] == 'y'
+              && buffer[i + 3] == 'p'
+              && isLikelyMp4Brand(buffer, i + 4)) {
+        return scanStart + i - 4L;
+      }
+    }
+
+    return -1;
+  }
+
+  private static boolean isLikelyMp4Brand(byte[] buffer, int brandOffset) {
+    if (brandOffset + 4 > buffer.length) {
+      return false;
+    }
+
+    String brand = new String(buffer, brandOffset, 4, StandardCharsets.US_ASCII);
+    return "mp4 ".equals(brand)
+            || "mp41".equals(brand)
+            || "mp42".equals(brand)
+            || "isom".equals(brand)
+            || "iso6".equals(brand)
+            || "M4V ".equals(brand);
+  }
+
+  private static File buildMotionPhotoCacheFile(File cacheDir, File sourceFile) {
+    String fileName = sourceFile.getName();
+    int extensionIndex = fileName.lastIndexOf('.');
+    String baseName = extensionIndex >= 0 ? fileName.substring(0, extensionIndex) : fileName;
+    String safeBaseName = baseName.replaceAll("[^a-zA-Z0-9._-]", "_");
+    String cacheName = safeBaseName
+            + "-"
+            + sourceFile.length()
+            + "-"
+            + sourceFile.lastModified()
+            + ".mp4";
+    return new File(cacheDir, cacheName);
+  }
+
+  private static boolean writeMotionPhotoVideoFile(File sourceFile, File outputFile, long startOffset) {
+    File tempFile = new File(outputFile.getAbsolutePath() + ".tmp");
+    if (tempFile.exists() && !tempFile.delete()) {
+      return false;
+    }
+
+    byte[] buffer = new byte[16 * 1024];
+    try (RandomAccessFile inputFile = new RandomAccessFile(sourceFile, "r");
+         FileOutputStream outputStream = new FileOutputStream(tempFile)) {
+      inputFile.seek(startOffset);
+
+      int bytesRead;
+      while ((bytesRead = inputFile.read(buffer)) != -1) {
+        outputStream.write(buffer, 0, bytesRead);
+      }
+      outputStream.flush();
+    } catch (IOException e) {
+      FLog.w(ReactConstants.TAG, "Could not export Motion Photo video for " + sourceFile, e);
+      tempFile.delete();
+      return false;
+    }
+
+    if (outputFile.exists() && !outputFile.delete()) {
+      tempFile.delete();
+      return false;
+    }
+
+    if (!tempFile.renameTo(outputFile)) {
+      tempFile.delete();
+      return false;
+    }
+
+    return true;
   }
 
   /**
