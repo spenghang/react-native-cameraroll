@@ -254,6 +254,7 @@ Returns a Promise with photo identifier objects from the local camera roll of th
   * `All`
   * `Videos`
   * `Photos` // default
+  * `Live` // only returns Live Photos / Motion Photos
 * `mimeTypes` : {Array} : Filter by mimetype (e.g. image/jpeg). Note that using this will reduce performance slightly on iOS.
 * `fromTime` : {number} : Filter by creation time with a timestamp in milliseconds. This time is exclusive, so we'll select all photos with `timestamp > fromTime`.
 * `toTime` : {number} : Filter by creation time with a timestamp in milliseconds. This time is inclusive, so we'll select all photos with `timestamp <= toTime`.

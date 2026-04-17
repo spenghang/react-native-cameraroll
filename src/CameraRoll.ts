@@ -61,6 +61,7 @@ export type Include =
   | 'albums';
 
 export type AssetType = 'All' | 'Videos' | 'Photos';
+export type GetPhotosAssetType = AssetType | 'Live';
 
 export type AlbumType = 'All' | 'Album' | 'SmartAlbum';
 
@@ -97,9 +98,9 @@ export type GetPhotosParams = {
   includeSharedAlbums?: boolean;
 
   /**
-   * Specifies filter on asset type
+   * Specifies filter on asset type. `Live` returns only Live Photos / Motion Photos.
    */
-  assetType?: AssetType;
+  assetType?: GetPhotosAssetType;
 
   /**
    * Earliest time to get photos from. A timestamp in milliseconds. Exclusive.

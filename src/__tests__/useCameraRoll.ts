@@ -91,6 +91,28 @@ describe('useCameraRoll()', () => {
       });
     });
 
+    it('should preserve the Live assetType for getPhotos', async () => {
+      const customParams = {
+        first: 1,
+        assetType: 'Live' as const,
+      };
+      const {result, waitForNextUpdate} = renderHook(() => useCameraRoll());
+      const [, getPhotos] = result.current;
+
+      (RNCCameraRoll.getPhotos as jest.Mock).mockResolvedValueOnce(
+        createPhotosMock(),
+      );
+      getPhotos(customParams);
+
+      await waitForNextUpdate();
+
+      expect(RNCCameraRoll.getPhotos).toHaveBeenCalledWith({
+        assetType: 'Live',
+        first: 1,
+        groupTypes: 'All',
+      });
+    });
+
     it('should return result of getPhotos', async () => {
       const mockPhotos = createPhotosMock({
         edges: [{node: {type: 'mock-type'}}],

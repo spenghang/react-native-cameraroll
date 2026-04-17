@@ -81,6 +81,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
   private static final String ASSET_TYPE_PHOTOS = "Photos";
   private static final String ASSET_TYPE_VIDEOS = "Videos";
   private static final String ASSET_TYPE_ALL = "All";
+  private static final String ASSET_TYPE_LIVE = "Live";
 
   private static final String INCLUDE_FILENAME = "filename";
   private static final String INCLUDE_FILE_SIZE = "fileSize";
@@ -289,8 +290,9 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
    *                    image/jpeg)
    *                  </li>
    *                  <li>
-   *                    assetType (optional): chooses between either photos or videos from the camera roll.
-   *                    Valid values are "Photos" or "Videos". Defaults to photos.
+   *                    assetType (optional): chooses between photos, videos, or live photos from
+   *                    the camera roll. Valid values are "Photos", "Videos", or "Live".
+   *                    Defaults to photos.
    *                  </li>
    *                </ul>
    * @param promise the Promise to be resolved when the photos are loaded; for a format of the
@@ -383,12 +385,13 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     protected void doInBackgroundGuarded(Void... params) {
       StringBuilder selection = new StringBuilder("1");
       List<String> selectionArgs = new ArrayList<>();
+      boolean isLivePhotosOnly = mAssetType.equals(ASSET_TYPE_LIVE);
       if (!TextUtils.isEmpty(mGroupName)) {
         selection.append(" AND " + SELECTION_BUCKET);
         selectionArgs.add(mGroupName);
       }
 
-      if (mAssetType.equals(ASSET_TYPE_PHOTOS)) {
+      if (mAssetType.equals(ASSET_TYPE_PHOTOS) || isLivePhotosOnly) {
         selection.append(" AND " + MediaStore.Files.FileColumns.MEDIA_TYPE + " = "
                 + MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE);
       } else if (mAssetType.equals(ASSET_TYPE_VIDEOS)) {
@@ -402,7 +405,8 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
         mPromise.reject(
                 ERROR_UNABLE_TO_FILTER,
                 "Invalid filter option: '" + mAssetType + "'. Expected one of '"
-                        + ASSET_TYPE_PHOTOS + "', '" + ASSET_TYPE_VIDEOS + "' or '" + ASSET_TYPE_ALL + "'."
+                        + ASSET_TYPE_PHOTOS + "', '" + ASSET_TYPE_VIDEOS + "', '"
+                        + ASSET_TYPE_LIVE + "' or '" + ASSET_TYPE_ALL + "'."
         );
         return;
       }
@@ -443,8 +447,10 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
           bundle.putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS,
                   selectionArgs.toArray(new String[selectionArgs.size()]));
           bundle.putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, Images.Media.DATE_ADDED + " DESC, " + Images.Media.DATE_MODIFIED + " DESC");
-          bundle.putInt(ContentResolver.QUERY_ARG_LIMIT, mFirst + 1);
-          if (!TextUtils.isEmpty(mAfter)) {
+          if (!isLivePhotosOnly) {
+            bundle.putInt(ContentResolver.QUERY_ARG_LIMIT, mFirst + 1);
+          }
+          if (!isLivePhotosOnly && !TextUtils.isEmpty(mAfter)) {
             bundle.putInt(ContentResolver.QUERY_ARG_OFFSET, Integer.parseInt(mAfter));
           }
           media = resolver.query(
@@ -454,12 +460,16 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
                   null);
         } else {
           // set LIMIT to first + 1 so that we know how to populate page_info
-          String limit = "limit=" + (mFirst + 1);
-          if (!TextUtils.isEmpty(mAfter)) {
-            limit = "limit=" + mAfter + "," + (mFirst + 1);
+          Uri mediaStoreUri = MediaStore.Files.getContentUri("external");
+          if (!isLivePhotosOnly) {
+            String limit = "limit=" + (mFirst + 1);
+            if (!TextUtils.isEmpty(mAfter)) {
+              limit = "limit=" + mAfter + "," + (mFirst + 1);
+            }
+            mediaStoreUri = mediaStoreUri.buildUpon().encodedQuery(limit).build();
           }
           media = resolver.query(
-                  MediaStore.Files.getContentUri("external").buildUpon().encodedQuery(limit).build(),
+                  mediaStoreUri,
                   PROJECTION,
                   selection.toString(),
                   selectionArgs.toArray(new String[selectionArgs.size()]),
@@ -470,8 +480,13 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
           mPromise.reject(ERROR_UNABLE_TO_LOAD, "Could not get media");
         } else {
           try {
-            putEdges(resolver, media, response, mFirst, mInclude);
-            putPageInfo(media, response, mFirst, !TextUtils.isEmpty(mAfter) ? Integer.parseInt(mAfter) : 0);
+            if (isLivePhotosOnly) {
+              int offset = !TextUtils.isEmpty(mAfter) ? Integer.parseInt(mAfter) : 0;
+              putLivePhotoEdges(resolver, media, response, mFirst, mInclude, offset);
+            } else {
+              putEdges(resolver, media, response, mFirst, mInclude);
+              putPageInfo(media, response, mFirst, !TextUtils.isEmpty(mAfter) ? Integer.parseInt(mAfter) : 0);
+            }
           } finally {
             media.close();
             mPromise.resolve(response);
@@ -560,13 +575,21 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
   }
 
   private static void putPageInfo(Cursor media, WritableMap response, int limit, int offset) {
+    putPageInfo(
+            response,
+            limit < media.getCount(),
+            limit < media.getCount() ? Integer.toString(offset + limit) : null
+    );
+  }
+
+  private static void putPageInfo(
+          WritableMap response,
+          boolean hasNextPage,
+          @Nullable String endCursor) {
     WritableMap pageInfo = new WritableNativeMap();
-    pageInfo.putBoolean("has_next_page", limit < media.getCount());
-    if (limit < media.getCount()) {
-      pageInfo.putString(
-              "end_cursor",
-              Integer.toString(offset + limit)
-      );
+    pageInfo.putBoolean("has_next_page", hasNextPage);
+    if (hasNextPage && endCursor != null) {
+      pageInfo.putString("end_cursor", endCursor);
     }
     response.putMap("page_info", pageInfo);
   }
@@ -621,6 +644,67 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
       media.moveToNext();
     }
     response.putArray("edges", edges);
+  }
+
+  private static void putLivePhotoEdges(
+          ContentResolver resolver,
+          Cursor media,
+          WritableMap response,
+          int limit,
+          Set<String> include,
+          int offset) {
+    WritableArray edges = new WritableNativeArray();
+    int idIndex = media.getColumnIndex(Images.Media._ID);
+    int mimeTypeIndex = media.getColumnIndex(Images.Media.MIME_TYPE);
+    int groupNameIndex = media.getColumnIndex(Images.Media.BUCKET_DISPLAY_NAME);
+    int dateTakenIndex = media.getColumnIndex(Images.Media.DATE_TAKEN);
+    int dateAddedIndex = media.getColumnIndex(MediaStore.MediaColumns.DATE_ADDED);
+    int dateModifiedIndex = media.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED);
+    int widthIndex = media.getColumnIndex(MediaStore.MediaColumns.WIDTH);
+    int heightIndex = media.getColumnIndex(MediaStore.MediaColumns.HEIGHT);
+    int sizeIndex = media.getColumnIndex(MediaStore.MediaColumns.SIZE);
+    int dataIndex = media.getColumnIndex(MediaStore.MediaColumns.DATA);
+    int orientationIndex = media.getColumnIndex(MediaStore.MediaColumns.ORIENTATION);
+
+    if (!media.moveToPosition(offset)) {
+      response.putArray("edges", edges);
+      putPageInfo(response, false, null);
+      return;
+    }
+
+    boolean hasNextPage = false;
+    @Nullable String endCursor = null;
+    int collected = 0;
+
+    do {
+      if (isMotionPhotoAsset(media.getString(dataIndex), media.getString(mimeTypeIndex))) {
+        if (collected == limit) {
+          hasNextPage = true;
+          endCursor = Integer.toString(media.getPosition());
+          break;
+        }
+
+        WritableMap edge = new WritableNativeMap();
+        WritableMap node = new WritableNativeMap();
+        boolean imageInfoSuccess =
+                putImageInfo(resolver, media, node, widthIndex, heightIndex, sizeIndex, dataIndex, orientationIndex,
+                        mimeTypeIndex, include.contains(INCLUDE_FILENAME), include.contains(INCLUDE_FILE_SIZE),
+                        include.contains(INCLUDE_FILE_EXTENSION), include.contains(INCLUDE_IMAGE_SIZE),
+                        include.contains(INCLUDE_PLAYABLE_DURATION), include.contains(INCLUDE_ORIENTATION));
+        if (imageInfoSuccess) {
+          putBasicNodeInfo(media, node, idIndex, mimeTypeIndex, groupNameIndex, dateTakenIndex, dateAddedIndex,
+                  dateModifiedIndex, include.contains(INCLUDE_ALBUMS));
+          putLocationInfo(media, node, dataIndex, include.contains(INCLUDE_LOCATION), mimeTypeIndex, resolver);
+
+          edge.putMap("node", node);
+          edges.pushMap(edge);
+          collected++;
+        }
+      }
+    } while (media.moveToNext());
+
+    response.putArray("edges", edges);
+    putPageInfo(response, hasNextPage, endCursor);
   }
 
   private static void putBasicNodeInfo(
@@ -821,6 +905,27 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     }
 
     return Uri.fromFile(outputFile).toString();
+  }
+
+  private static boolean isMotionPhotoAsset(
+          @Nullable String filePath,
+          @Nullable String mimeType) {
+    if (mimeType == null || !mimeType.startsWith("image") || TextUtils.isEmpty(filePath)) {
+      return false;
+    }
+
+    File sourceFile = new File(filePath);
+    if (!sourceFile.exists() || !sourceFile.isFile()) {
+      return false;
+    }
+
+    String metadata = readMotionPhotoMetadata(sourceFile);
+    if (!containsMotionPhotoMarker(metadata)) {
+      return false;
+    }
+
+    long videoStartOffset = resolveMotionPhotoVideoStartOffset(sourceFile, metadata);
+    return videoStartOffset > 0 && videoStartOffset < sourceFile.length();
   }
 
   private static boolean containsMotionPhotoMarker(String metadata) {
