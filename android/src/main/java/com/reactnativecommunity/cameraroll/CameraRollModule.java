@@ -631,7 +631,12 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
                       mimeTypeIndex, includeFilename, includeFileSize, includeFileExtension, includeImageSize,
                       includePlayableDuration, includeOrientation);
       if (imageInfoSuccess) {
-        putBasicNodeInfo(media, node, idIndex, mimeTypeIndex, groupNameIndex, dateTakenIndex, dateAddedIndex, dateModifiedIndex, includeAlbums);
+        // Detect Google Motion Photo / Samsung MicroVideo for regular Photos/All
+        // queries as well, so node.subTypes is consistent with iOS PhotoLive.
+        // isMotionPhotoAsset short-circuits for non-image mime types, so videos
+        // in the "All" path incur virtually no extra cost.
+        boolean isLivePhoto = isMotionPhotoAsset(media.getString(dataIndex), media.getString(mimeTypeIndex));
+        putBasicNodeInfo(media, node, idIndex, mimeTypeIndex, groupNameIndex, dateTakenIndex, dateAddedIndex, dateModifiedIndex, includeAlbums, isLivePhoto);
         putLocationInfo(media, node, dataIndex, includeLocation, mimeTypeIndex, resolver);
 
         edge.putMap("node", node);
@@ -693,7 +698,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
                         include.contains(INCLUDE_PLAYABLE_DURATION), include.contains(INCLUDE_ORIENTATION));
         if (imageInfoSuccess) {
           putBasicNodeInfo(media, node, idIndex, mimeTypeIndex, groupNameIndex, dateTakenIndex, dateAddedIndex,
-                  dateModifiedIndex, include.contains(INCLUDE_ALBUMS));
+                  dateModifiedIndex, include.contains(INCLUDE_ALBUMS), true);
           putLocationInfo(media, node, dataIndex, include.contains(INCLUDE_LOCATION), mimeTypeIndex, resolver);
 
           edge.putMap("node", node);
@@ -716,10 +721,16 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
           int dateTakenIndex,
           int dateAddedIndex,
           int dateModifiedIndex,
-          boolean includeAlbums) {
+          boolean includeAlbums,
+          boolean isLivePhoto) {
     node.putString("id", Long.toString(media.getLong(idIndex)));
     node.putString("type", media.getString(mimeTypeIndex));
     WritableArray subTypes = Arguments.createArray();
+    if (isLivePhoto) {
+      // Align with iOS: Motion Photos are surfaced as "PhotoLive" subtype so JS
+      // consumers can detect live/motion assets uniformly across platforms.
+      subTypes.pushString("PhotoLive");
+    }
     node.putArray("subTypes", subTypes);
     WritableArray group_name = Arguments.createArray();
     if (includeAlbums) {

@@ -212,6 +212,10 @@ export type PhotoThumbnail = {
   thumbnailBase64: string,
 };
 
+export type PhotoVideoURI = {
+  liveVideoUri: string | null,
+};
+
 /**
  * `CameraRoll` provides access to the local camera roll or photo library.
  *
@@ -306,6 +310,16 @@ export class CameraRoll {
       ...options
     }
     return RNCCameraRoll.getPhotoByInternalID(internalID, conversionOptions);
+  }
+
+  /**
+   * Returns a Promise with the paired video URI for a Live Photo / Motion Photo asset.
+   *
+   * @param internalID - PH photo internal ID.
+   * @returns Promise<PhotoVideoURI>
+   */
+  static getPhotoVideoURI(internalID: string): Promise<PhotoVideoURI> {
+    return RNCCameraRoll.getPhotoVideoURI(internalID);
   }
 
     /**
