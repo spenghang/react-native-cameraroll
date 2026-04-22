@@ -74,6 +74,7 @@ type PhotoIdentifiersPage = {
 
 export interface Spec extends TurboModule {
   saveToCameraRoll(uri: string, options: Object): Promise<string>;
+  saveLivePhoto(options: Object): Promise<string>;
   getPhotos(params: Object): Promise<PhotoIdentifiersPage>;
   getAlbums(params: Object): Promise<Album[]>;
   deletePhotos(photoUris: Array<string>): Promise<void>;

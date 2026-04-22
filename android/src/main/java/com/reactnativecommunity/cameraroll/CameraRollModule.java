@@ -140,6 +140,319 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
             .executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
   }
 
+  /**
+   * Build a Motion Photo (JPEG + appended MP4 with Google/Samsung-compatible
+   * XMP markers) from a cover image and a paired video, then save it into
+   * the camera roll. The resulting file is recognised as a Live / Motion
+   * Photo by Google Photos, Samsung Gallery and this library's own
+   * {@code getPhotos({ assetType: 'Live' })} query.
+   */
+  @ReactMethod
+  public void saveLivePhoto(ReadableMap options, Promise promise) {
+    if (options == null
+            || !options.hasKey("imageUri") || options.isNull("imageUri")
+            || !options.hasKey("videoUri") || options.isNull("videoUri")) {
+      promise.reject(ERROR_UNABLE_TO_SAVE, "saveLivePhoto requires both imageUri and videoUri");
+      return;
+    }
+    new SaveLivePhotoTask(getReactApplicationContext(), options, promise)
+            .executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
+  }
+
+  private static class SaveLivePhotoTask extends GuardedAsyncTask<Void, Void> {
+
+    private final Context mContext;
+    private final ReadableMap mOptions;
+    private final Promise mPromise;
+
+    SaveLivePhotoTask(ReactContext context, ReadableMap options, Promise promise) {
+      super(context);
+      mContext = context;
+      mOptions = options;
+      mPromise = promise;
+    }
+
+    @Override
+    protected void doInBackgroundGuarded(Void... params) {
+      File tempFile = null;
+      try {
+        String imageUriStr = mOptions.getString("imageUri");
+        String videoUriStr = mOptions.getString("videoUri");
+        String album = mOptions.hasKey("album") && !mOptions.isNull("album")
+                ? mOptions.getString("album") : "";
+        String title = mOptions.hasKey("title") && !mOptions.isNull("title")
+                ? mOptions.getString("title") : "";
+
+        File imageFile = resolveLocalFile(imageUriStr);
+        File videoFile = resolveLocalFile(videoUriStr);
+        if (imageFile == null || !imageFile.isFile()) {
+          mPromise.reject(ERROR_UNABLE_TO_LOAD, "Could not read cover image at " + imageUriStr);
+          return;
+        }
+        if (videoFile == null || !videoFile.isFile()) {
+          mPromise.reject(ERROR_UNABLE_TO_LOAD, "Could not read video at " + videoUriStr);
+          return;
+        }
+
+        // Build Motion Photo: JPEG (+ injected XMP APP1) | MP4
+        File cacheDir = new File(mContext.getCacheDir(), MOTION_PHOTO_CACHE_DIR);
+        if (!cacheDir.exists() && !cacheDir.mkdirs()) {
+          mPromise.reject(ERROR_UNABLE_TO_SAVE, "Could not create motion photo cache dir");
+          return;
+        }
+
+        String baseName = TextUtils.isEmpty(title)
+                ? "LIVE_" + System.currentTimeMillis()
+                : title;
+        tempFile = new File(cacheDir, baseName + ".jpg");
+        if (tempFile.exists() && !tempFile.delete()) {
+          mPromise.reject(ERROR_UNABLE_TO_SAVE, "Could not overwrite temp motion photo file");
+          return;
+        }
+
+        long videoLength = videoFile.length();
+        if (!buildMotionPhotoFile(imageFile, videoFile, tempFile, videoLength)) {
+          mPromise.reject(ERROR_UNABLE_TO_SAVE, "Failed to build motion photo payload");
+          return;
+        }
+
+        String savedUri = insertMotionPhotoIntoMediaStore(mContext, tempFile, album, baseName);
+        if (savedUri == null) {
+          mPromise.reject(ERROR_UNABLE_TO_SAVE, "Could not insert motion photo into MediaStore");
+          return;
+        }
+
+        mPromise.resolve(savedUri);
+      } catch (Exception e) {
+        mPromise.reject(ERROR_UNABLE_TO_SAVE, "Failed to save live photo: " + e.getMessage(), e);
+      } finally {
+        if (tempFile != null && tempFile.exists()) {
+          // Best-effort cleanup; ignore result.
+          //noinspection ResultOfMethodCallIgnored
+          tempFile.delete();
+        }
+      }
+    }
+  }
+
+  @Nullable
+  private static File resolveLocalFile(@Nullable String uriStr) {
+    if (TextUtils.isEmpty(uriStr)) {
+      return null;
+    }
+    try {
+      Uri uri = Uri.parse(uriStr);
+      String scheme = uri.getScheme();
+      if (scheme == null || "file".equalsIgnoreCase(scheme)) {
+        String path = uri.getPath();
+        if (path != null) {
+          File f = new File(path);
+          if (f.exists()) return f;
+        }
+      }
+      File direct = new File(uriStr);
+      if (direct.exists()) return direct;
+    } catch (Exception ignored) {
+    }
+    return null;
+  }
+
+  /**
+   * Build a Motion Photo file by:
+   * 1. Injecting a Google/Samsung-compatible XMP APP1 segment right after the
+   *    JPEG SOI so that both {@code GCamera:MicroVideoOffset} and the
+   *    Container schema's {@code Item:Semantic="MotionPhoto"} markers are
+   *    present.
+   * 2. Streaming the remainder of the original JPEG.
+   * 3. Appending the raw MP4 bytes at the tail.
+   */
+  private static boolean buildMotionPhotoFile(
+          File imageFile,
+          File videoFile,
+          File outputFile,
+          long videoLength) {
+    byte[] xmpSegment = buildMotionPhotoXmpAppSegment(videoLength);
+    if (xmpSegment == null) {
+      return false;
+    }
+
+    byte[] buffer = new byte[32 * 1024];
+    try (FileInputStream imageIn = new FileInputStream(imageFile);
+         FileOutputStream out = new FileOutputStream(outputFile)) {
+
+      byte[] soi = new byte[2];
+      int read = imageIn.read(soi);
+      if (read != 2 || (soi[0] & 0xFF) != 0xFF || (soi[1] & 0xFF) != 0xD8) {
+        FLog.w(ReactConstants.TAG, "Cover image is not a JPEG (missing SOI marker)");
+        return false;
+      }
+      out.write(soi);
+      out.write(xmpSegment);
+
+      int n;
+      while ((n = imageIn.read(buffer)) != -1) {
+        out.write(buffer, 0, n);
+      }
+
+      try (FileInputStream videoIn = new FileInputStream(videoFile)) {
+        while ((n = videoIn.read(buffer)) != -1) {
+          out.write(buffer, 0, n);
+        }
+      }
+      out.flush();
+      return true;
+    } catch (IOException e) {
+      FLog.w(ReactConstants.TAG, "Could not build motion photo file", e);
+      return false;
+    }
+  }
+
+  @Nullable
+  private static byte[] buildMotionPhotoXmpAppSegment(long videoLength) {
+    String xmp =
+            "<?xpacket begin=\"\uFEFF\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>"
+            + "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"RNCameraRoll\">"
+            + "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
+            + "<rdf:Description rdf:about=\"\""
+            + " xmlns:GCamera=\"http://ns.google.com/photos/1.0/camera/\""
+            + " xmlns:Container=\"http://ns.google.com/photos/1.0/container/\""
+            + " xmlns:Item=\"http://ns.google.com/photos/1.0/container/item/\""
+            + " GCamera:MotionPhoto=\"1\""
+            + " GCamera:MotionPhotoVersion=\"1\""
+            + " GCamera:MotionPhotoPresentationTimestampUs=\"0\""
+            + " GCamera:MicroVideo=\"1\""
+            + " GCamera:MicroVideoVersion=\"1\""
+            + " GCamera:MicroVideoOffset=\"" + videoLength + "\""
+            + " GCamera:MicroVideoPresentationTimestampUs=\"0\">"
+            + "<Container:Directory>"
+            + "<rdf:Seq>"
+            + "<rdf:li rdf:parseType=\"Resource\">"
+            + "<Container:Item Item:Mime=\"image/jpeg\" Item:Semantic=\"Primary\" Item:Length=\"0\"/>"
+            + "</rdf:li>"
+            + "<rdf:li rdf:parseType=\"Resource\">"
+            + "<Container:Item Item:Mime=\"video/mp4\" Item:Semantic=\"MotionPhoto\" Item:Length=\""
+            + videoLength + "\"/>"
+            + "</rdf:li>"
+            + "</rdf:Seq>"
+            + "</Container:Directory>"
+            + "</rdf:Description>"
+            + "</rdf:RDF>"
+            + "</x:xmpmeta>"
+            + "<?xpacket end=\"w\"?>";
+
+    byte[] xmpBytes = xmp.getBytes(StandardCharsets.UTF_8);
+    byte[] header = "http://ns.adobe.com/xap/1.0/\0".getBytes(StandardCharsets.US_ASCII);
+
+    int payloadLength = header.length + xmpBytes.length;
+    int segmentLength = 2 + payloadLength; // length field itself + payload
+    if (segmentLength > 0xFFFF) {
+      FLog.w(ReactConstants.TAG, "Motion photo XMP payload too large: " + segmentLength);
+      return null;
+    }
+
+    byte[] segment = new byte[2 + segmentLength];
+    segment[0] = (byte) 0xFF;
+    segment[1] = (byte) 0xE1; // APP1
+    segment[2] = (byte) ((segmentLength >> 8) & 0xFF);
+    segment[3] = (byte) (segmentLength & 0xFF);
+    System.arraycopy(header, 0, segment, 4, header.length);
+    System.arraycopy(xmpBytes, 0, segment, 4 + header.length, xmpBytes.length);
+    return segment;
+  }
+
+  @Nullable
+  private static String insertMotionPhotoIntoMediaStore(
+          Context context,
+          File sourceFile,
+          String album,
+          String displayBaseName) {
+    ContentResolver resolver = context.getContentResolver();
+    boolean hasAlbum = !TextUtils.isEmpty(album);
+    String displayName = displayBaseName + ".jpg";
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      ContentValues values = new ContentValues();
+      values.put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
+      values.put(Images.Media.DISPLAY_NAME, displayName);
+      if (hasAlbum) {
+        values.put(MediaStore.MediaColumns.RELATIVE_PATH,
+                Environment.DIRECTORY_DCIM + File.separator + album);
+      } else {
+        values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DCIM);
+      }
+      values.put(Images.Media.IS_PENDING, 1);
+
+      Uri target = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+      if (target == null) return null;
+
+      try (FileInputStream in = new FileInputStream(sourceFile);
+           OutputStream out = resolver.openOutputStream(target)) {
+        if (out == null) return null;
+        FileUtils.copy(in, out);
+      } catch (IOException e) {
+        FLog.w(ReactConstants.TAG, "Could not write motion photo to MediaStore", e);
+        resolver.delete(target, null, null);
+        return null;
+      }
+
+      ContentValues update = new ContentValues();
+      update.put(Images.Media.IS_PENDING, 0);
+      resolver.update(target, update, null, null);
+      return target.toString();
+    } else {
+      File exportDir;
+      if (hasAlbum) {
+        exportDir = new File(Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_PICTURES), album);
+      } else {
+        exportDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM);
+      }
+      if (!exportDir.exists() && !exportDir.mkdirs()) {
+        return null;
+      }
+      File dest = new File(exportDir, displayName);
+      int n = 0;
+      while (dest.exists()) {
+        dest = new File(exportDir, displayBaseName + "_" + (n++) + ".jpg");
+      }
+      try (FileInputStream in = new FileInputStream(sourceFile);
+           FileOutputStream out = new FileOutputStream(dest)) {
+        byte[] buffer = new byte[32 * 1024];
+        int r;
+        while ((r = in.read(buffer)) != -1) {
+          out.write(buffer, 0, r);
+        }
+        out.flush();
+      } catch (IOException e) {
+        FLog.w(ReactConstants.TAG, "Could not write motion photo to external storage", e);
+        return null;
+      }
+
+      final String[] savedUri = new String[1];
+      final Object lock = new Object();
+      MediaScannerConnection.scanFile(
+              context,
+              new String[]{dest.getAbsolutePath()},
+              new String[]{"image/jpeg"},
+              (path, uri) -> {
+                synchronized (lock) {
+                  savedUri[0] = uri != null ? uri.toString() : Uri.fromFile(new File(path)).toString();
+                  lock.notifyAll();
+                }
+              });
+      synchronized (lock) {
+        if (savedUri[0] == null) {
+          try {
+            lock.wait(5000);
+          } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+          }
+        }
+      }
+      return savedUri[0] != null ? savedUri[0] : Uri.fromFile(dest).toString();
+    }
+  }
+
   private static class SaveToCameraRoll extends GuardedAsyncTask<Void, Void> {
 
     private final Context mContext;

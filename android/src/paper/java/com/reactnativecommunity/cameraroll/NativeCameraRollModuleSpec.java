@@ -33,6 +33,10 @@ public abstract class NativeCameraRollModuleSpec extends ReactContextBaseJavaMod
 
   @ReactMethod
   @DoNotStrip
+  public abstract void saveLivePhoto(ReadableMap options, Promise promise);
+
+  @ReactMethod
+  @DoNotStrip
   public abstract void getPhotos(ReadableMap params, Promise promise);
 
   @ReactMethod

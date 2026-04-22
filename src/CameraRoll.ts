@@ -175,6 +175,27 @@ export type SaveToCameraRollOptions = {
   title?: string;
 };
 
+/**
+ * Options for `CameraRoll.saveLivePhoto`.
+ *
+ * On iOS this produces a real Live Photo (image + paired video) by injecting
+ * a shared content identifier into the image maker note and the video
+ * QuickTime metadata.
+ *
+ * On Android this produces a Google/Samsung compatible Motion Photo
+ * (JPEG + appended MP4 with XMP markers).
+ */
+export type SaveLivePhotoOptions = {
+  /** Local URI of the cover image (file:// or absolute path). */
+  imageUri: string;
+  /** Local URI of the paired video (file:// or absolute path). */
+  videoUri: string;
+  /** Optional album name to save the Live Photo into. */
+  album?: string;
+  /** Optional output filename (without extension). Android only. */
+  title?: string;
+};
+
 export type GetAlbumsParams = {
   assetType?: AssetType;
   albumType?: AlbumType;
@@ -264,6 +285,29 @@ export class CameraRoll {
       'CameraRoll.saveToCameraRoll(tag, type) is deprecated.  Use the save function instead',
     );
     return CameraRoll.save(tag, {type});
+  }
+
+  /**
+   * Save a Live Photo (iOS) / Motion Photo (Android) built from a cover image
+   * and a paired video.
+   *
+   * - On iOS the image and video are rewritten with a shared
+   *   `assetIdentifier` so the Photos app recognises them as a native Live
+   *   Photo and adds them as a single asset.
+   * - On Android a Motion Photo file is produced (JPEG + appended MP4 with
+   *   XMP markers) and inserted into MediaStore so the system gallery and
+   *   this library's `getPhotos({ assetType: 'Live' })` treat it as a Live
+   *   asset.
+   *
+   * @returns A Promise resolving to the saved asset URI (iOS: `ph://...`,
+   * Android: content / file URI).
+   */
+  static saveLivePhoto(options: SaveLivePhotoOptions): Promise<string> {
+    if (!options || !options.imageUri || !options.videoUri) {
+      throw new Error('saveLivePhoto requires both imageUri and videoUri');
+    }
+    const {imageUri, videoUri, album = '', title = ''} = options;
+    return RNCCameraRoll.saveLivePhoto({imageUri, videoUri, album, title});
   }
 
   static getAlbums(

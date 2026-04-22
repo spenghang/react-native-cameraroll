@@ -11,6 +11,9 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <Photos/Photos.h>
+#import <AVFoundation/AVFoundation.h>
+#import <CoreMedia/CoreMedia.h>
+#import <ImageIO/ImageIO.h>
 #import <dlfcn.h>
 #import <objc/runtime.h>
 #import <MobileCoreServices/UTType.h>
@@ -259,6 +262,452 @@ RCT_EXPORT_METHOD(saveToCameraRoll:(NSURLRequest *)request
 
   requestPhotoLibraryAccess(reject, loadBlock, true);
 }
+
+#pragma mark - Live Photo
+
+static NSString *const kLivePhotoContentIdentifierKey = @"com.apple.quicktime.content.identifier";
+static NSString *const kLivePhotoStillImageTimeKey = @"com.apple.quicktime.still-image-time";
+
++ (NSURL *)rnc_resolveLocalFileURL:(NSString *)input
+{
+  if (input.length == 0) {
+    return nil;
+  }
+  NSURL *url = [NSURL URLWithString:input];
+  if (url == nil || url.scheme == nil) {
+    url = [NSURL fileURLWithPath:input];
+  } else if ([url.scheme.lowercaseString isEqualToString:@"file"]) {
+    // already a file URL
+  } else {
+    return nil;
+  }
+  if (![[NSFileManager defaultManager] fileExistsAtPath:url.path]) {
+    return nil;
+  }
+  return url;
+}
+
++ (BOOL)rnc_writeImage:(NSURL *)sourceURL
+    assetIdentifier:(NSString *)assetIdentifier
+          outputURL:(NSURL *)outputURL
+              error:(NSError **)error
+{
+  NSData *imageData = [NSData dataWithContentsOfURL:sourceURL];
+  if (imageData == nil) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"RNCCameraRoll" code:-10 userInfo:@{NSLocalizedDescriptionKey: @"Unable to read cover image"}];
+    }
+    return NO;
+  }
+
+  CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)imageData, NULL);
+  if (source == NULL) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"RNCCameraRoll" code:-11 userInfo:@{NSLocalizedDescriptionKey: @"Cover image is not decodable"}];
+    }
+    return NO;
+  }
+
+  CFStringRef sourceType = CGImageSourceGetType(source);
+  if (sourceType == NULL) {
+    sourceType = (__bridge CFStringRef)@"public.jpeg";
+  }
+
+  NSDictionary *originalMetadata = (__bridge_transfer NSDictionary *)CGImageSourceCopyPropertiesAtIndex(source, 0, NULL);
+  NSMutableDictionary *mutableMetadata = originalMetadata ? [originalMetadata mutableCopy] : [NSMutableDictionary dictionary];
+  NSMutableDictionary *makerApple = [mutableMetadata[(NSString *)kCGImagePropertyMakerAppleDictionary] mutableCopy];
+  if (makerApple == nil) {
+    makerApple = [NSMutableDictionary dictionary];
+  }
+  // Apple uses the integer key "17" for the Live Photo asset identifier.
+  makerApple[@"17"] = assetIdentifier;
+  mutableMetadata[(NSString *)kCGImagePropertyMakerAppleDictionary] = makerApple;
+
+  [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
+  CGImageDestinationRef destination = CGImageDestinationCreateWithURL((__bridge CFURLRef)outputURL, sourceType, 1, NULL);
+  if (destination == NULL) {
+    CFRelease(source);
+    if (error) {
+      *error = [NSError errorWithDomain:@"RNCCameraRoll" code:-12 userInfo:@{NSLocalizedDescriptionKey: @"Unable to create image destination"}];
+    }
+    return NO;
+  }
+
+  CGImageDestinationAddImageFromSource(destination, source, 0, (__bridge CFDictionaryRef)mutableMetadata);
+  BOOL finalized = CGImageDestinationFinalize(destination);
+  CFRelease(destination);
+  CFRelease(source);
+
+  if (!finalized && error) {
+    *error = [NSError errorWithDomain:@"RNCCameraRoll" code:-13 userInfo:@{NSLocalizedDescriptionKey: @"Unable to finalize image destination"}];
+  }
+  return finalized;
+}
+
++ (AVMutableMetadataItem *)rnc_contentIdentifierMetadataItem:(NSString *)assetIdentifier
+{
+  AVMutableMetadataItem *item = [AVMutableMetadataItem metadataItem];
+  item.keySpace = AVMetadataKeySpaceQuickTimeMetadata;
+  item.key = kLivePhotoContentIdentifierKey;
+  item.value = assetIdentifier;
+  item.dataType = (__bridge NSString *)kCMMetadataBaseDataType_UTF8;
+  return item;
+}
+
++ (AVMutableMetadataItem *)rnc_stillImageTimeMetadataItem
+{
+  AVMutableMetadataItem *item = [AVMutableMetadataItem metadataItem];
+  item.keySpace = AVMetadataKeySpaceQuickTimeMetadata;
+  item.key = kLivePhotoStillImageTimeKey;
+  // Apple uses a signed 8-bit value of 0xFF (-1) here.
+  item.value = @(-1);
+  item.dataType = (__bridge NSString *)kCMMetadataBaseDataType_SInt8;
+  return item;
+}
+
++ (BOOL)rnc_writeLivePhotoVideo:(NSURL *)sourceURL
+                assetIdentifier:(NSString *)assetIdentifier
+                      outputURL:(NSURL *)outputURL
+                          error:(NSError **)error
+{
+  [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
+
+  AVURLAsset *asset = [AVURLAsset URLAssetWithURL:sourceURL options:nil];
+  AVAssetTrack *videoTrack = [[asset tracksWithMediaType:AVMediaTypeVideo] firstObject];
+  if (videoTrack == nil) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"RNCCameraRoll" code:-20 userInfo:@{NSLocalizedDescriptionKey: @"Video file has no video track"}];
+    }
+    return NO;
+  }
+
+  NSError *readerError = nil;
+  AVAssetReader *reader = [AVAssetReader assetReaderWithAsset:asset error:&readerError];
+  if (reader == nil) {
+    if (error) *error = readerError;
+    return NO;
+  }
+
+  NSError *writerError = nil;
+  AVAssetWriter *writer = [AVAssetWriter assetWriterWithURL:outputURL
+                                                  fileType:AVFileTypeQuickTimeMovie
+                                                     error:&writerError];
+  if (writer == nil) {
+    if (error) *error = writerError;
+    return NO;
+  }
+  writer.metadata = @[[self rnc_contentIdentifierMetadataItem:assetIdentifier]];
+
+  // Video passthrough.
+  AVAssetReaderTrackOutput *videoOutput = [AVAssetReaderTrackOutput
+                                           assetReaderTrackOutputWithTrack:videoTrack
+                                           outputSettings:nil];
+  if (![reader canAddOutput:videoOutput]) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"RNCCameraRoll" code:-21 userInfo:@{NSLocalizedDescriptionKey: @"Cannot add video output"}];
+    }
+    return NO;
+  }
+  [reader addOutput:videoOutput];
+
+  CMFormatDescriptionRef videoFormat = (__bridge CMFormatDescriptionRef)videoTrack.formatDescriptions.firstObject;
+  AVAssetWriterInput *videoInput = [AVAssetWriterInput
+                                    assetWriterInputWithMediaType:AVMediaTypeVideo
+                                    outputSettings:nil
+                                    sourceFormatHint:videoFormat];
+  videoInput.expectsMediaDataInRealTime = NO;
+  videoInput.transform = videoTrack.preferredTransform;
+  if (![writer canAddInput:videoInput]) {
+    if (error) {
+      *error = [NSError errorWithDomain:@"RNCCameraRoll" code:-22 userInfo:@{NSLocalizedDescriptionKey: @"Cannot add video input"}];
+    }
+    return NO;
+  }
+  [writer addInput:videoInput];
+
+  // Audio passthrough (optional).
+  AVAssetTrack *audioTrack = [[asset tracksWithMediaType:AVMediaTypeAudio] firstObject];
+  AVAssetReaderTrackOutput *audioOutput = nil;
+  AVAssetWriterInput *audioInput = nil;
+  if (audioTrack) {
+    audioOutput = [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:audioTrack outputSettings:nil];
+    if ([reader canAddOutput:audioOutput]) {
+      [reader addOutput:audioOutput];
+      CMFormatDescriptionRef audioFormat = (__bridge CMFormatDescriptionRef)audioTrack.formatDescriptions.firstObject;
+      audioInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeAudio
+                                                       outputSettings:nil
+                                                     sourceFormatHint:audioFormat];
+      audioInput.expectsMediaDataInRealTime = NO;
+      if ([writer canAddInput:audioInput]) {
+        [writer addInput:audioInput];
+      } else {
+        audioInput = nil;
+        audioOutput = nil;
+      }
+    } else {
+      audioOutput = nil;
+    }
+  }
+
+  // Timed metadata track (still-image-time).
+  CMFormatDescriptionRef metadataFormatDesc = NULL;
+  NSArray *specs = @[@{
+    (__bridge NSString *)kCMMetadataFormatDescriptionMetadataSpecificationKey_Identifier: [NSString stringWithFormat:@"mdta/%@", kLivePhotoStillImageTimeKey],
+    (__bridge NSString *)kCMMetadataFormatDescriptionMetadataSpecificationKey_DataType: (__bridge NSString *)kCMMetadataBaseDataType_SInt8
+  }];
+  OSStatus status = CMMetadataFormatDescriptionCreateWithMetadataSpecifications(
+      kCFAllocatorDefault,
+      kCMMetadataFormatType_Boxed,
+      (__bridge CFArrayRef)specs,
+      &metadataFormatDesc);
+  AVAssetWriterInput *metadataInput = nil;
+  AVAssetWriterInputMetadataAdaptor *metadataAdaptor = nil;
+  if (status == noErr && metadataFormatDesc != NULL) {
+    metadataInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeMetadata
+                                                        outputSettings:nil
+                                                      sourceFormatHint:metadataFormatDesc];
+    metadataInput.expectsMediaDataInRealTime = NO;
+    metadataAdaptor = [AVAssetWriterInputMetadataAdaptor assetWriterInputMetadataAdaptorWithAssetWriterInput:metadataInput];
+    if ([writer canAddInput:metadataInput]) {
+      [writer addInput:metadataInput];
+    } else {
+      metadataInput = nil;
+      metadataAdaptor = nil;
+    }
+    CFRelease(metadataFormatDesc);
+  }
+
+  if (![writer startWriting]) {
+    if (error) *error = writer.error;
+    return NO;
+  }
+  if (![reader startReading]) {
+    if (error) *error = reader.error;
+    return NO;
+  }
+  [writer startSessionAtSourceTime:kCMTimeZero];
+
+  // Append the still-image-time metadata right at the start.
+  if (metadataAdaptor) {
+    CMTimeRange range = CMTimeRangeMake(kCMTimeZero, CMTimeMake(1, 100));
+    AVTimedMetadataGroup *group = [[AVTimedMetadataGroup alloc] initWithItems:@[[self rnc_stillImageTimeMetadataItem]]
+                                                                     timeRange:range];
+    [metadataAdaptor appendTimedMetadataGroup:group];
+    [metadataInput markAsFinished];
+  }
+
+  dispatch_group_t group = dispatch_group_create();
+  dispatch_queue_t videoQueue = dispatch_queue_create("RNCLivePhoto.video", DISPATCH_QUEUE_SERIAL);
+  dispatch_queue_t audioQueue = dispatch_queue_create("RNCLivePhoto.audio", DISPATCH_QUEUE_SERIAL);
+
+  dispatch_group_enter(group);
+  [videoInput requestMediaDataWhenReadyOnQueue:videoQueue usingBlock:^{
+    while (videoInput.isReadyForMoreMediaData) {
+      if (reader.status != AVAssetReaderStatusReading) {
+        [videoInput markAsFinished];
+        dispatch_group_leave(group);
+        return;
+      }
+      CMSampleBufferRef sampleBuffer = [videoOutput copyNextSampleBuffer];
+      if (sampleBuffer) {
+        BOOL appended = [videoInput appendSampleBuffer:sampleBuffer];
+        CFRelease(sampleBuffer);
+        if (!appended) {
+          [videoInput markAsFinished];
+          dispatch_group_leave(group);
+          return;
+        }
+      } else {
+        [videoInput markAsFinished];
+        dispatch_group_leave(group);
+        return;
+      }
+    }
+  }];
+
+  if (audioInput && audioOutput) {
+    dispatch_group_enter(group);
+    [audioInput requestMediaDataWhenReadyOnQueue:audioQueue usingBlock:^{
+      while (audioInput.isReadyForMoreMediaData) {
+        if (reader.status != AVAssetReaderStatusReading) {
+          [audioInput markAsFinished];
+          dispatch_group_leave(group);
+          return;
+        }
+        CMSampleBufferRef sampleBuffer = [audioOutput copyNextSampleBuffer];
+        if (sampleBuffer) {
+          BOOL appended = [audioInput appendSampleBuffer:sampleBuffer];
+          CFRelease(sampleBuffer);
+          if (!appended) {
+            [audioInput markAsFinished];
+            dispatch_group_leave(group);
+            return;
+          }
+        } else {
+          [audioInput markAsFinished];
+          dispatch_group_leave(group);
+          return;
+        }
+      }
+    }];
+  }
+
+  dispatch_group_wait(group, DISPATCH_TIME_FOREVER);
+
+  if (reader.status == AVAssetReaderStatusFailed) {
+    if (error) *error = reader.error;
+    [writer cancelWriting];
+    return NO;
+  }
+
+  __block BOOL finishSuccess = NO;
+  dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+  [writer finishWritingWithCompletionHandler:^{
+    finishSuccess = (writer.status == AVAssetWriterStatusCompleted);
+    dispatch_semaphore_signal(semaphore);
+  }];
+  dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+
+  if (!finishSuccess) {
+    if (error) *error = writer.error;
+    return NO;
+  }
+  return YES;
+}
+
+RCT_EXPORT_METHOD(saveLivePhoto:(NSDictionary *)options
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+  NSString *imageUriStr = [RCTConvert NSString:options[@"imageUri"]];
+  NSString *videoUriStr = [RCTConvert NSString:options[@"videoUri"]];
+  NSString *album = [RCTConvert NSString:options[@"album"]];
+
+  if (imageUriStr.length == 0 || videoUriStr.length == 0) {
+    reject(kErrorUnableToSave, @"saveLivePhoto requires both imageUri and videoUri", nil);
+    return;
+  }
+
+  NSURL *imageURL = [RNCCameraRoll rnc_resolveLocalFileURL:imageUriStr];
+  NSURL *videoURL = [RNCCameraRoll rnc_resolveLocalFileURL:videoUriStr];
+  if (imageURL == nil) {
+    reject(kErrorUnableToLoad, [NSString stringWithFormat:@"Could not read cover image at %@", imageUriStr], nil);
+    return;
+  }
+  if (videoURL == nil) {
+    reject(kErrorUnableToLoad, [NSString stringWithFormat:@"Could not read video at %@", videoUriStr], nil);
+    return;
+  }
+
+  requestPhotoLibraryAccess(reject, ^(bool isLimited) {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+      NSString *assetIdentifier = [[NSUUID UUID] UUIDString];
+
+      NSString *imageExt = [imageURL.pathExtension lowercaseString] ?: @"jpg";
+      NSString *tempImagePath = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                                  [NSString stringWithFormat:@"live-%@.%@", assetIdentifier, imageExt]];
+      NSURL *tempImageURL = [NSURL fileURLWithPath:tempImagePath];
+
+      NSString *tempVideoPath = [NSTemporaryDirectory() stringByAppendingPathComponent:
+                                  [NSString stringWithFormat:@"live-%@.mov", assetIdentifier]];
+      NSURL *tempVideoURL = [NSURL fileURLWithPath:tempVideoPath];
+
+      NSError *imageError = nil;
+      if (![RNCCameraRoll rnc_writeImage:imageURL
+                         assetIdentifier:assetIdentifier
+                               outputURL:tempImageURL
+                                   error:&imageError]) {
+        reject(kErrorUnableToSave, @"Failed to rewrite cover image", imageError);
+        return;
+      }
+
+      NSError *videoError = nil;
+      if (![RNCCameraRoll rnc_writeLivePhotoVideo:videoURL
+                                  assetIdentifier:assetIdentifier
+                                        outputURL:tempVideoURL
+                                            error:&videoError]) {
+        [[NSFileManager defaultManager] removeItemAtURL:tempImageURL error:nil];
+        reject(kErrorUnableToSave, @"Failed to rewrap paired video", videoError);
+        return;
+      }
+
+      void (^cleanup)(void) = ^{
+        [[NSFileManager defaultManager] removeItemAtURL:tempImageURL error:nil];
+        [[NSFileManager defaultManager] removeItemAtURL:tempVideoURL error:nil];
+      };
+
+      __block PHObjectPlaceholder *placeholder = nil;
+
+      void (^performSave)(PHAssetCollection *collection) = ^(PHAssetCollection *collection) {
+        [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+          PHAssetCreationRequest *request = [PHAssetCreationRequest creationRequestForAsset];
+          PHAssetResourceCreationOptions *imageOptions = [[PHAssetResourceCreationOptions alloc] init];
+          imageOptions.shouldMoveFile = YES;
+          [request addResourceWithType:PHAssetResourceTypePhoto
+                               fileURL:tempImageURL
+                               options:imageOptions];
+
+          PHAssetResourceCreationOptions *videoOptions = [[PHAssetResourceCreationOptions alloc] init];
+          videoOptions.shouldMoveFile = YES;
+          [request addResourceWithType:PHAssetResourceTypePairedVideo
+                               fileURL:tempVideoURL
+                               options:videoOptions];
+          placeholder = [request placeholderForCreatedAsset];
+
+          if (collection) {
+            PHFetchResult *assetsInCollection = [PHAsset fetchAssetsInAssetCollection:collection options:nil];
+            PHAssetCollectionChangeRequest *albumChange = [PHAssetCollectionChangeRequest
+                                                           changeRequestForAssetCollection:collection
+                                                                                    assets:assetsInCollection];
+            [albumChange addAssets:@[placeholder]];
+          }
+        } completionHandler:^(BOOL success, NSError * _Nullable error) {
+          cleanup();
+          if (success && placeholder) {
+            NSString *uri = [NSString stringWithFormat:@"ph://%@", placeholder.localIdentifier];
+            resolve(uri);
+          } else {
+            NSString *msg = error
+              ? [NSString stringWithFormat:@"Failed to save live photo to the photo library: %@", error.localizedDescription]
+              : @"Failed to save live photo to the photo library";
+            reject(kErrorUnableToSave, msg, error);
+          }
+        }];
+      };
+
+      if (album.length > 0) {
+        PHFetchOptions *fetchOptions = [[PHFetchOptions alloc] init];
+        fetchOptions.predicate = [NSPredicate predicateWithFormat:@"title = %@", album];
+        PHAssetCollection *existing = [PHAssetCollection fetchAssetCollectionsWithType:PHAssetCollectionTypeAlbum
+                                                                                subtype:PHAssetCollectionSubtypeAny
+                                                                                options:fetchOptions].firstObject;
+        if (existing) {
+          performSave(existing);
+        } else {
+          __block NSString *placeholderLocalId = nil;
+          [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
+            PHAssetCollectionChangeRequest *create = [PHAssetCollectionChangeRequest
+                                                      creationRequestForAssetCollectionWithTitle:album];
+            placeholderLocalId = create.placeholderForCreatedAssetCollection.localIdentifier;
+          } completionHandler:^(BOOL success, NSError * _Nullable error) {
+            if (!success || placeholderLocalId == nil) {
+              cleanup();
+              reject(kErrorUnableToSave, @"Failed to create target album", error);
+              return;
+            }
+            PHAssetCollection *created = [PHAssetCollection fetchAssetCollectionsWithLocalIdentifiers:@[placeholderLocalId]
+                                                                                              options:nil].firstObject;
+            performSave(created);
+          }];
+        }
+      } else {
+        performSave(nil);
+      }
+    });
+  }, true);
+}
+
+#pragma mark -
 
 RCT_EXPORT_METHOD(getAlbums:(NSDictionary *)params
                   resolve:(RCTPromiseResolveBlock)resolve
