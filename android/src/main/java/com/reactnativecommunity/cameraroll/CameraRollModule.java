@@ -134,6 +134,14 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     return manufacturer != null && manufacturer.equalsIgnoreCase("vivo");
   }
 
+  private static boolean isOppoDevice() {
+    String manufacturer = Build.MANUFACTURER;
+    return manufacturer != null
+            && (manufacturer.equalsIgnoreCase("OPPO")
+            || manufacturer.equalsIgnoreCase("realme")
+            || manufacturer.equalsIgnoreCase("OnePlus"));
+  }
+
   @Override
   public String getName() {
     return NAME;
@@ -253,7 +261,8 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
           success = buildHuaweiMotionPhotoFile(imageFile, videoFile, tempFile,
                   videoLength, videoMeta[0], videoMeta[1]);
         } else {
-          success = buildStandardMotionPhotoFile(imageFile, videoFile, tempFile, videoLength);
+          success = buildStandardMotionPhotoFile(imageFile, videoFile, tempFile,
+                  videoLength, isOppoDevice());
         }
         if (!success) {
           mPromise.reject(ERROR_UNABLE_TO_SAVE, "Failed to build motion photo payload");
@@ -307,13 +316,24 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
   /**
    * Standard Motion Photo: inject Google/Samsung-compatible XMP into the
    * JPEG header, then append the raw MP4. Works on Xiaomi, Google, Samsung.
+   * When {@code oppoFormat} is true, OPPO-specific OpCamera XMP attributes
+   * are included so the OPPO/realme/OnePlus Gallery recognises the file.
    */
   private static boolean buildStandardMotionPhotoFile(
           File imageFile,
           File videoFile,
           File outputFile,
           long videoLength) {
-    byte[] xmpSegment = buildMotionPhotoXmpAppSegment(videoLength);
+    return buildStandardMotionPhotoFile(imageFile, videoFile, outputFile, videoLength, false);
+  }
+
+  private static boolean buildStandardMotionPhotoFile(
+          File imageFile,
+          File videoFile,
+          File outputFile,
+          long videoLength,
+          boolean oppoFormat) {
+    byte[] xmpSegment = buildMotionPhotoXmpAppSegment(videoLength, oppoFormat);
     if (xmpSegment == null) {
       return false;
     }
@@ -329,6 +349,9 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
         return false;
       }
       out.write(soi);
+      if (oppoFormat) {
+        out.write(buildOppoExifAppSegment());
+      }
       out.write(xmpSegment);
 
       int n;
@@ -632,38 +655,124 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     }
   }
 
+  /**
+   * Build the EXIF APP1 segment that OPPO/ColorOS MediaScanner requires to
+   * recognise a file as a live photo. The bytes are an exact copy of a
+   * proven working EXIF from a third-party app (Meitu), with a fixed
+   * {@code UserComment = "oplus_8388608"} that the OPPO scanner reads.
+   */
+  private static byte[] buildOppoExifAppSegment() {
+    // Verified-working EXIF payload (Exif\0\0 + TIFF) – 112 bytes.
+    // IFD0: ImageWidth(1440), ImageHeight(3178), ExifIFD->62, Orientation(0)
+    // ExifIFD: UserComment("oplus_8388608"), LightSource(0)
+    byte[] payload = {
+            0x45, 0x78, 0x69, 0x66, 0x00, 0x00,                         // "Exif\0\0"
+            0x4D, 0x4D, 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08,             // MM, 42, IFD0@8
+            0x00, 0x04,                                                   // IFD0: 4 entries
+            0x01, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01,             // ImageWidth LONG
+            0x00, 0x00, 0x05, (byte) 0xA0,                               //   = 1440
+            0x01, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01,             // ImageHeight LONG
+            0x00, 0x00, 0x0C, 0x6A,                                       //   = 3178
+            (byte) 0x87, 0x69, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01,     // ExifIFD LONG
+            0x00, 0x00, 0x00, 0x3E,                                       //   -> offset 62
+            0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01,             // Orientation SHORT
+            0x00, 0x00, 0x00, 0x00,                                       //   = 0
+            0x00, 0x00, 0x00, 0x00,                                       // next IFD = 0
+            0x00, 0x02,                                                   // ExifIFD: 2 entries
+            (byte) 0x92, (byte) 0x86, 0x00, 0x02, 0x00, 0x00, 0x00, 0x0E, // UserComment ASCII len=14
+            0x00, 0x00, 0x00, 0x5C,                                       //   data -> offset 92
+            (byte) 0x92, 0x08, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01,     // LightSource LONG
+            0x00, 0x00, 0x00, 0x00,                                       //   = 0
+            0x00, 0x00, 0x00, 0x00,                                       // next IFD = 0
+            0x6F, 0x70, 0x6C, 0x75, 0x73, 0x5F,                         // "oplus_"
+            0x38, 0x33, 0x38, 0x38, 0x36, 0x30, 0x38, 0x00              // "8388608\0"
+    };
+
+    int segLen = 2 + payload.length;
+    byte[] seg = new byte[2 + segLen];
+    seg[0] = (byte) 0xFF;
+    seg[1] = (byte) 0xE1;
+    seg[2] = (byte) ((segLen >> 8) & 0xFF);
+    seg[3] = (byte) (segLen & 0xFF);
+    System.arraycopy(payload, 0, seg, 4, payload.length);
+    return seg;
+  }
+
   @Nullable
   private static byte[] buildMotionPhotoXmpAppSegment(long videoLength) {
-    String xmp =
-            "<?xpacket begin=\"\uFEFF\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>"
-            + "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"RNCameraRoll\">"
-            + "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
-            + "<rdf:Description rdf:about=\"\""
-            + " xmlns:GCamera=\"http://ns.google.com/photos/1.0/camera/\""
-            + " xmlns:Container=\"http://ns.google.com/photos/1.0/container/\""
-            + " xmlns:Item=\"http://ns.google.com/photos/1.0/container/item/\""
-            + " GCamera:MotionPhoto=\"1\""
-            + " GCamera:MotionPhotoVersion=\"1\""
-            + " GCamera:MotionPhotoPresentationTimestampUs=\"0\""
-            + " GCamera:MicroVideo=\"1\""
-            + " GCamera:MicroVideoVersion=\"1\""
-            + " GCamera:MicroVideoOffset=\"" + videoLength + "\""
-            + " GCamera:MicroVideoPresentationTimestampUs=\"0\">"
-            + "<Container:Directory>"
-            + "<rdf:Seq>"
-            + "<rdf:li rdf:parseType=\"Resource\">"
-            + "<Container:Item Item:Mime=\"image/jpeg\" Item:Semantic=\"Primary\" Item:Length=\"0\"/>"
-            + "</rdf:li>"
-            + "<rdf:li rdf:parseType=\"Resource\">"
-            + "<Container:Item Item:Mime=\"video/mp4\" Item:Semantic=\"MotionPhoto\" Item:Length=\""
-            + videoLength + "\"/>"
-            + "</rdf:li>"
-            + "</rdf:Seq>"
-            + "</Container:Directory>"
-            + "</rdf:Description>"
-            + "</rdf:RDF>"
-            + "</x:xmpmeta>"
-            + "<?xpacket end=\"w\"?>";
+    return buildMotionPhotoXmpAppSegment(videoLength, false);
+  }
+
+  @Nullable
+  private static byte[] buildMotionPhotoXmpAppSegment(long videoLength, boolean oppoFormat) {
+    String xmp;
+    if (oppoFormat) {
+      // OPPO format: must match the structure that OPPO Gallery validates at
+      // runtime. Modelled after Meitu (verified working on OPPO Find X8).
+      // No <?xpacket>, no MicroVideo, Primary has no Length attribute.
+      xmp = "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"Adobe XMP Core 5.1.0-jc003\">\n"
+              + "  <rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">\n"
+              + "    <rdf:Description rdf:about=\"\"\n"
+              + "        xmlns:GCamera=\"http://ns.google.com/photos/1.0/camera/\"\n"
+              + "        xmlns:OpCamera=\"http://ns.oplus.com/photos/1.0/camera/\"\n"
+              + "        xmlns:Container=\"http://ns.google.com/photos/1.0/container/\"\n"
+              + "        xmlns:Item=\"http://ns.google.com/photos/1.0/container/item/\"\n"
+              + "      GCamera:MotionPhoto=\"1\"\n"
+              + "      GCamera:MotionPhotoVersion=\"1\"\n"
+              + "      GCamera:MotionPhotoPresentationTimestampUs=\"0\"\n"
+              + "      OpCamera:MotionPhotoPrimaryPresentationTimestampUs=\"0\"\n"
+              + "      OpCamera:MotionPhotoOwner=\"oplus\"\n"
+              + "      OpCamera:OLivePhotoVersion=\"2\"\n"
+              + "      OpCamera:VideoLength=\"" + videoLength + "\">\n"
+              + "      <Container:Directory>\n"
+              + "        <rdf:Seq>\n"
+              + "          <rdf:li rdf:parseType=\"Resource\">\n"
+              + "            <Container:Item\n"
+              + "              Item:Mime=\"image/jpeg\"\n"
+              + "              Item:Semantic=\"Primary\"/>\n"
+              + "          </rdf:li>\n"
+              + "          <rdf:li rdf:parseType=\"Resource\">\n"
+              + "            <Container:Item\n"
+              + "              Item:Mime=\"video/mp4\"\n"
+              + "              Item:Semantic=\"MotionPhoto\"\n"
+              + "              Item:Length=\"" + videoLength + "\"/>\n"
+              + "          </rdf:li>\n"
+              + "        </rdf:Seq>\n"
+              + "      </Container:Directory>\n"
+              + "    </rdf:Description>\n"
+              + "  </rdf:RDF>\n"
+              + "</x:xmpmeta>\n";
+    } else {
+      xmp = "<?xpacket begin=\"\uFEFF\" id=\"W5M0MpCehiHzreSzNTczkc9d\"?>"
+              + "<x:xmpmeta xmlns:x=\"adobe:ns:meta/\" x:xmptk=\"RNCameraRoll\">"
+              + "<rdf:RDF xmlns:rdf=\"http://www.w3.org/1999/02/22-rdf-syntax-ns#\">"
+              + "<rdf:Description rdf:about=\"\""
+              + " xmlns:GCamera=\"http://ns.google.com/photos/1.0/camera/\""
+              + " xmlns:Container=\"http://ns.google.com/photos/1.0/container/\""
+              + " xmlns:Item=\"http://ns.google.com/photos/1.0/container/item/\""
+              + " GCamera:MotionPhoto=\"1\""
+              + " GCamera:MotionPhotoVersion=\"1\""
+              + " GCamera:MotionPhotoPresentationTimestampUs=\"0\""
+              + " GCamera:MicroVideo=\"1\""
+              + " GCamera:MicroVideoVersion=\"1\""
+              + " GCamera:MicroVideoOffset=\"" + videoLength + "\""
+              + " GCamera:MicroVideoPresentationTimestampUs=\"0\">"
+              + "<Container:Directory>"
+              + "<rdf:Seq>"
+              + "<rdf:li rdf:parseType=\"Resource\">"
+              + "<Container:Item Item:Mime=\"image/jpeg\" Item:Semantic=\"Primary\" Item:Length=\"0\"/>"
+              + "</rdf:li>"
+              + "<rdf:li rdf:parseType=\"Resource\">"
+              + "<Container:Item Item:Mime=\"video/mp4\" Item:Semantic=\"MotionPhoto\" Item:Length=\""
+              + videoLength + "\"/>"
+              + "</rdf:li>"
+              + "</rdf:Seq>"
+              + "</Container:Directory>"
+              + "</rdf:Description>"
+              + "</rdf:RDF>"
+              + "</x:xmpmeta>"
+              + "<?xpacket end=\"w\"?>";
+    }
 
     byte[] xmpBytes = xmp.getBytes(StandardCharsets.UTF_8);
     byte[] header = "http://ns.adobe.com/xap/1.0/\0".getBytes(StandardCharsets.US_ASCII);
@@ -702,7 +811,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
       if (hasAlbum) {
         values.put(MediaStore.MediaColumns.RELATIVE_PATH,
                 Environment.DIRECTORY_DCIM + File.separator + album);
-      } else if (isHuaweiDevice()) {
+      } else if (isHuaweiDevice() || isOppoDevice()) {
         values.put(MediaStore.MediaColumns.RELATIVE_PATH,
                 Environment.DIRECTORY_DCIM + File.separator + "Camera");
       } else {
@@ -732,7 +841,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
       if (hasAlbum) {
         exportDir = new File(Environment.getExternalStoragePublicDirectory(
                 Environment.DIRECTORY_PICTURES), album);
-      } else if (isHuaweiDevice()) {
+      } else if (isHuaweiDevice() || isOppoDevice()) {
         exportDir = new File(Environment.getExternalStoragePublicDirectory(
                 Environment.DIRECTORY_DCIM), "Camera");
       } else {
