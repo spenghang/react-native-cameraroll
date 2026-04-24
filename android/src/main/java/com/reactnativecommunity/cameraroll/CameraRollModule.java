@@ -95,6 +95,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
   private static final int MOTION_PHOTO_XMP_SCAN_BYTES = 512 * 1024;
   private static final int MOTION_PHOTO_VIDEO_SCAN_BYTES = 16 * 1024 * 1024;
   private static final int HUAWEI_LIVE_PHOTO_TRAILER_SIZE = 60;
+  private static final int VIVO_LIVE_PHOTO_TAIL_SCAN_BYTES = 2048;
   private static final Pattern MICRO_VIDEO_OFFSET_PATTERN =
           Pattern.compile("(?:Camera|GCamera):MicroVideoOffset[^0-9]*(\\d+)");
   private static final Pattern MOTION_PHOTO_LENGTH_PATTERN =
@@ -126,6 +127,11 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     String manufacturer = Build.MANUFACTURER;
     return manufacturer != null
             && (manufacturer.equalsIgnoreCase("HUAWEI") || manufacturer.equalsIgnoreCase("HONOR"));
+  }
+
+  private static boolean isVivoDevice() {
+    String manufacturer = Build.MANUFACTURER;
+    return manufacturer != null && manufacturer.equalsIgnoreCase("vivo");
   }
 
   @Override
@@ -182,6 +188,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     @Override
     protected void doInBackgroundGuarded(Void... params) {
       File tempFile = null;
+      File tempVivoMp4 = null;
       try {
         String imageUriStr = mOptions.getString("imageUri");
         String videoUriStr = mOptions.getString("videoUri");
@@ -201,7 +208,6 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
           return;
         }
 
-        // Build Motion Photo: JPEG (+ injected XMP APP1) | MP4
         File cacheDir = new File(mContext.getCacheDir(), MOTION_PHOTO_CACHE_DIR);
         if (!cacheDir.exists() && !cacheDir.mkdirs()) {
           mPromise.reject(ERROR_UNABLE_TO_SAVE, "Could not create motion photo cache dir");
@@ -214,6 +220,29 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
         tempFile = new File(cacheDir, baseName + ".jpg");
         if (tempFile.exists() && !tempFile.delete()) {
           mPromise.reject(ERROR_UNABLE_TO_SAVE, "Could not overwrite temp motion photo file");
+          return;
+        }
+
+        if (isVivoDevice()) {
+          String livePhotoId = String.format("%012x%08x00000000",
+                  System.currentTimeMillis(),
+                  (int) (Math.random() * 0xFFFFFFFF));
+          if (!buildVivoLivePhotoJpeg(imageFile, tempFile, livePhotoId)) {
+            mPromise.reject(ERROR_UNABLE_TO_SAVE, "Failed to build vivo live photo jpeg");
+            return;
+          }
+          tempVivoMp4 = new File(cacheDir, baseName + ".mp4");
+          if (!buildVivoLivePhotoMp4(videoFile, tempVivoMp4, livePhotoId)) {
+            mPromise.reject(ERROR_UNABLE_TO_SAVE, "Failed to build vivo live photo mp4");
+            return;
+          }
+          String savedUri = insertVivoLivePhotoIntoMediaStore(
+                  mContext, tempFile, tempVivoMp4, album, baseName);
+          if (savedUri == null) {
+            mPromise.reject(ERROR_UNABLE_TO_SAVE, "Could not insert vivo live photo into MediaStore");
+            return;
+          }
+          mPromise.resolve(savedUri);
           return;
         }
 
@@ -242,9 +271,12 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
         mPromise.reject(ERROR_UNABLE_TO_SAVE, "Failed to save live photo: " + e.getMessage(), e);
       } finally {
         if (tempFile != null && tempFile.exists()) {
-          // Best-effort cleanup; ignore result.
           //noinspection ResultOfMethodCallIgnored
           tempFile.delete();
+        }
+        if (tempVivoMp4 != null && tempVivoMp4.exists()) {
+          //noinspection ResultOfMethodCallIgnored
+          tempVivoMp4.delete();
         }
       }
     }
@@ -438,6 +470,168 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     return sb.toString();
   }
 
+  /**
+   * Build the JPEG part of a vivo live photo: copy the original JPEG,
+   * append the streaminfo section and vivo JSON trailer so the vivo
+   * Gallery recognises the JPEG + companion-MP4 pair.
+   *
+   * On-disk layout after the JPEG FFD9 end marker:
+   * <pre>
+   *   [streaminfo entries]      – binary video-stream descriptors
+   *   streamcount\x00{count}    – stream count marker
+   *   vivo{...JSON...}          – UTF-8 JSON with camera / livephoto metadata
+   *   [4-byte BE jsonBodyLen]   – length of JSON body "{...}"
+   *   cameralbum!               – ASCII marker
+   *   \x00\x00\x00/{id}        – companion-video identifier path
+   *   \xFF\xFF\xFF\xFF          – end marker
+   *   [gradient LUT]            – 11-byte ramp (optional display hint)
+   * </pre>
+   */
+  private static boolean buildVivoLivePhotoJpeg(
+          File imageFile, File outputFile, String livePhotoId) {
+    byte[] buffer = new byte[32 * 1024];
+    try (FileInputStream imageIn = new FileInputStream(imageFile);
+         FileOutputStream out = new FileOutputStream(outputFile)) {
+      int n;
+      while ((n = imageIn.read(buffer)) != -1) {
+        out.write(buffer, 0, n);
+      }
+      out.write(buildVivoStreamInfoSection());
+      out.write(buildVivoLivePhotoTrailer(livePhotoId));
+      out.flush();
+      return true;
+    } catch (IOException e) {
+      FLog.w(ReactConstants.TAG, "Could not build vivo live photo jpeg", e);
+      return false;
+    }
+  }
+
+  /**
+   * Build the MP4 part of a vivo live photo: copy the original MP4 and
+   * append a {@code vivoMediaExtInfo} UUID box containing the same
+   * vivo JSON trailer used in the JPEG.  The vivo Gallery requires
+   * this box in both files to recognise the pair.
+   */
+  private static boolean buildVivoLivePhotoMp4(
+          File videoFile, File outputFile, String livePhotoId) {
+    byte[] buffer = new byte[32 * 1024];
+    try (FileInputStream videoIn = new FileInputStream(videoFile);
+         FileOutputStream out = new FileOutputStream(outputFile)) {
+      int n;
+      while ((n = videoIn.read(buffer)) != -1) {
+        out.write(buffer, 0, n);
+      }
+      byte[] trailer = buildVivoLivePhotoTrailer(livePhotoId);
+      byte[] uuidName = "vivoMediaExtInfo".getBytes(StandardCharsets.US_ASCII);
+      int boxSize = 4 + 4 + uuidName.length + trailer.length; // size + 'uuid' + name + payload
+      out.write(new byte[] {
+              (byte) ((boxSize >> 24) & 0xFF),
+              (byte) ((boxSize >> 16) & 0xFF),
+              (byte) ((boxSize >> 8) & 0xFF),
+              (byte) (boxSize & 0xFF),
+              'u', 'u', 'i', 'd'
+      });
+      out.write(uuidName);
+      out.write(trailer);
+      out.flush();
+      return true;
+    } catch (IOException e) {
+      FLog.w(ReactConstants.TAG, "Could not build vivo live photo mp4", e);
+      return false;
+    }
+  }
+
+  /**
+   * Minimal streaminfo / streamcount section placed between the JPEG
+   * FFD9 end marker and the {@code vivo{}} JSON.  Values are based on
+   * captures from a vivo X100; the Gallery appears to require the
+   * section to be present but tolerates generic stream descriptors.
+   */
+  private static byte[] buildVivoStreamInfoSection() {
+    return new byte[] {
+      // 6 × streaminfo entries (19 bytes each)
+      0x73,0x74,0x72,0x65,0x61,0x6d,0x69,0x6e,0x66,0x6f, 0x00, 0x02,0x00,0x6c,0x0a,0x00,0x00,0x00,0x04,
+      0x73,0x74,0x72,0x65,0x61,0x6d,0x69,0x6e,0x66,0x6f, 0x00, 0x02,0x00,0x01,0x01,0x00,0x00,(byte)0xcd,0x58,
+      0x73,0x74,0x72,0x65,0x61,0x6d,0x69,0x6e,0x66,0x6f, 0x00, 0x02,0x00,0x04,0x02,0x00,0x00,0x78,0x6d,
+      0x73,0x74,0x72,0x65,0x61,0x6d,0x69,0x6e,0x66,0x6f, 0x00, 0x02,0x00,0x05,0x02,0x00,0x00,0x4e,0x38,
+      0x73,0x74,0x72,0x65,0x61,0x6d,0x69,0x6e,0x66,0x6f, 0x00, 0x02,0x00,0x65,0x0a,0x00,0x00,0x00,0x2e,
+      0x73,0x74,0x72,0x65,0x61,0x6d,0x69,0x6e,0x66,0x6f, 0x00, 0x03,0x00,0x01,0x01,0x00,0x0c,0x1d,(byte)0x80,
+      // streamcount marker + count=6
+      0x73,0x74,0x72,0x65,0x61,0x6d,0x63,0x6f,0x75,0x6e,0x74, 0x00, 0x06,
+    };
+  }
+
+  private static byte[] buildVivoLivePhotoTrailer(String livePhotoId) {
+    String model = Build.MODEL != null ? Build.MODEL : "vivo";
+    String jsonBody = "{"
+            + "\"com.android.camera.joint.fullview.orientation\":0,"
+            + "\"com.android.camera.hdr\":-1,"
+            + "\"com.android.camera.fisheye\":-1,"
+            + "\"com.android.camera.takenmodel\":\"" + model + "\","
+            + "\"com.android.camera.camerafacing\":\"0\","
+            + "\"com.android.camera.document\":-1,"
+            + "\"com.android.camera.joint.conshoot\":0,"
+            + "\"com.android.camera.joint.motioncapture\":0,"
+            + "\"com.android.camera.moduleid\":\"photo\","
+            + "\"com.android.camera.livephoto\":\"" + livePhotoId + "\","
+            + "\"version\":2014,"
+            + "\"com.android.camera.joint.fullview\":false"
+            + "}";
+
+    byte[] vivoJson = ("vivo" + jsonBody).getBytes(StandardCharsets.UTF_8);
+    int jsonBodyLen = jsonBody.getBytes(StandardCharsets.UTF_8).length;
+    byte[] cameralbum = "cameralbum!".getBytes(StandardCharsets.US_ASCII);
+    byte[] idPath = ("/" + livePhotoId).getBytes(StandardCharsets.US_ASCII);
+
+    // Trailing: \xFF\xFF\xFF\xFF + 11-byte gradient ramp
+    byte[] trailing = new byte[] {
+      (byte)0xFF,(byte)0xFF,(byte)0xFF,(byte)0xFF,
+      0x1b,0x2a,0x39,0x48,0x57,0x66,0x75,(byte)0x84,(byte)0x93,(byte)0xa2,(byte)0xb3
+    };
+
+    int totalLen = vivoJson.length + 4 + cameralbum.length + 3 + idPath.length + trailing.length;
+    byte[] result = new byte[totalLen];
+    int pos = 0;
+
+    System.arraycopy(vivoJson, 0, result, pos, vivoJson.length);
+    pos += vivoJson.length;
+
+    result[pos++] = (byte) ((jsonBodyLen >> 24) & 0xFF);
+    result[pos++] = (byte) ((jsonBodyLen >> 16) & 0xFF);
+    result[pos++] = (byte) ((jsonBodyLen >> 8) & 0xFF);
+    result[pos++] = (byte) (jsonBodyLen & 0xFF);
+
+    System.arraycopy(cameralbum, 0, result, pos, cameralbum.length);
+    pos += cameralbum.length;
+
+    result[pos++] = 0x00;
+    result[pos++] = 0x00;
+    result[pos++] = 0x00;
+
+    System.arraycopy(idPath, 0, result, pos, idPath.length);
+    pos += idPath.length;
+
+    System.arraycopy(trailing, 0, result, pos, trailing.length);
+
+    return result;
+  }
+
+  private static boolean copyFileSimple(File src, File dest) {
+    byte[] buffer = new byte[32 * 1024];
+    try (FileInputStream in = new FileInputStream(src);
+         FileOutputStream out = new FileOutputStream(dest)) {
+      int n;
+      while ((n = in.read(buffer)) != -1) {
+        out.write(buffer, 0, n);
+      }
+      out.flush();
+      return true;
+    } catch (IOException e) {
+      FLog.w(ReactConstants.TAG, "Could not copy file " + src + " to " + dest, e);
+      return false;
+    }
+  }
+
   @Nullable
   private static byte[] buildMotionPhotoXmpAppSegment(long videoLength) {
     String xmp =
@@ -587,6 +781,126 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
         }
       }
       return savedUri[0] != null ? savedUri[0] : Uri.fromFile(dest).toString();
+    }
+  }
+
+  /**
+   * Insert a vivo live photo pair (JPEG + companion MP4) into MediaStore.
+   * Both files are placed in the same directory with matching base names
+   * so the vivo Gallery can associate them.
+   */
+  @Nullable
+  private static String insertVivoLivePhotoIntoMediaStore(
+          Context context,
+          File jpegFile,
+          File mp4File,
+          String album,
+          String displayBaseName) {
+    ContentResolver resolver = context.getContentResolver();
+    boolean hasAlbum = !TextUtils.isEmpty(album);
+    String relativePath = hasAlbum
+            ? Environment.DIRECTORY_DCIM + File.separator + album
+            : Environment.DIRECTORY_DCIM + File.separator + "Camera";
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+      // --- Insert JPEG ---
+      ContentValues jpegValues = new ContentValues();
+      jpegValues.put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg");
+      jpegValues.put(Images.Media.DISPLAY_NAME, displayBaseName + ".jpg");
+      jpegValues.put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath);
+      jpegValues.put(Images.Media.IS_PENDING, 1);
+
+      Uri jpegUri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, jpegValues);
+      if (jpegUri == null) return null;
+
+      try (FileInputStream in = new FileInputStream(jpegFile);
+           OutputStream out = resolver.openOutputStream(jpegUri)) {
+        if (out == null) {
+          resolver.delete(jpegUri, null, null);
+          return null;
+        }
+        FileUtils.copy(in, out);
+      } catch (IOException e) {
+        FLog.w(ReactConstants.TAG, "Could not write vivo live photo jpeg to MediaStore", e);
+        resolver.delete(jpegUri, null, null);
+        return null;
+      }
+
+      ContentValues jpegDone = new ContentValues();
+      jpegDone.put(Images.Media.IS_PENDING, 0);
+      resolver.update(jpegUri, jpegDone, null, null);
+
+      // --- Insert companion MP4 ---
+      ContentValues mp4Values = new ContentValues();
+      mp4Values.put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4");
+      mp4Values.put(MediaStore.Video.Media.DISPLAY_NAME, displayBaseName + ".mp4");
+      mp4Values.put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath);
+      mp4Values.put(MediaStore.Video.Media.IS_PENDING, 1);
+
+      Uri mp4Uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, mp4Values);
+      if (mp4Uri != null) {
+        try (FileInputStream in = new FileInputStream(mp4File);
+             OutputStream out = resolver.openOutputStream(mp4Uri)) {
+          if (out != null) {
+            FileUtils.copy(in, out);
+            ContentValues mp4Done = new ContentValues();
+            mp4Done.put(MediaStore.Video.Media.IS_PENDING, 0);
+            resolver.update(mp4Uri, mp4Done, null, null);
+          } else {
+            resolver.delete(mp4Uri, null, null);
+          }
+        } catch (IOException e) {
+          FLog.w(ReactConstants.TAG, "Could not write vivo companion mp4 to MediaStore", e);
+          resolver.delete(mp4Uri, null, null);
+        }
+      }
+
+      return jpegUri.toString();
+    } else {
+      // Pre-Q: write files directly to external storage
+      File exportDir = new File(
+              Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+              hasAlbum ? album : "Camera");
+      if (!exportDir.exists() && !exportDir.mkdirs()) return null;
+
+      String actualBase = displayBaseName;
+      File destJpeg = new File(exportDir, actualBase + ".jpg");
+      File destMp4 = new File(exportDir, actualBase + ".mp4");
+      int n = 0;
+      while (destJpeg.exists() || destMp4.exists()) {
+        actualBase = displayBaseName + "_" + (n++);
+        destJpeg = new File(exportDir, actualBase + ".jpg");
+        destMp4 = new File(exportDir, actualBase + ".mp4");
+      }
+
+      if (!copyFileSimple(jpegFile, destJpeg)) return null;
+      copyFileSimple(mp4File, destMp4);
+
+      final String[] savedUri = new String[1];
+      final Object lock = new Object();
+      MediaScannerConnection.scanFile(
+              context,
+              new String[]{destJpeg.getAbsolutePath(), destMp4.getAbsolutePath()},
+              new String[]{"image/jpeg", "video/mp4"},
+              (path, uri) -> {
+                if (path.endsWith(".jpg") || path.endsWith(".JPG")) {
+                  synchronized (lock) {
+                    savedUri[0] = uri != null ? uri.toString()
+                            : Uri.fromFile(new File(path)).toString();
+                    lock.notifyAll();
+                  }
+                }
+              });
+      synchronized (lock) {
+        if (savedUri[0] == null) {
+          try {
+            lock.wait(5000);
+          } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+          }
+        }
+      }
+      return savedUri[0] != null ? savedUri[0] : Uri.fromFile(destJpeg).toString();
     }
   }
 
@@ -1074,6 +1388,15 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     boolean includeAlbums = include.contains(INCLUDE_ALBUMS);
 
     for (int i = 0; i < limit && !media.isAfterLast(); i++) {
+      String currentPath = media.getString(dataIndex);
+      String currentMime = media.getString(mimeTypeIndex);
+
+      if (isVivoCompanionVideo(currentPath, currentMime)) {
+        i--;
+        media.moveToNext();
+        continue;
+      }
+
       WritableMap edge = new WritableNativeMap();
       WritableMap node = new WritableNativeMap();
       boolean imageInfoSuccess =
@@ -1081,19 +1404,13 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
                       mimeTypeIndex, includeFilename, includeFileSize, includeFileExtension, includeImageSize,
                       includePlayableDuration, includeOrientation);
       if (imageInfoSuccess) {
-        // Detect Google Motion Photo / Samsung MicroVideo for regular Photos/All
-        // queries as well, so node.subTypes is consistent with iOS PhotoLive.
-        // isMotionPhotoAsset short-circuits for non-image mime types, so videos
-        // in the "All" path incur virtually no extra cost.
-        boolean isLivePhoto = isMotionPhotoAsset(media.getString(dataIndex), media.getString(mimeTypeIndex));
+        boolean isLivePhoto = isMotionPhotoAsset(currentPath, currentMime);
         putBasicNodeInfo(media, node, idIndex, mimeTypeIndex, groupNameIndex, dateTakenIndex, dateAddedIndex, dateModifiedIndex, includeAlbums, isLivePhoto);
         putLocationInfo(media, node, dataIndex, includeLocation, mimeTypeIndex, resolver);
 
         edge.putMap("node", node);
         edges.pushMap(edge);
       } else {
-        // we skipped an image because we couldn't get its details (e.g. width/height), so we
-        // decrement i in order to correctly reach the limit, if the cursor has enough rows
         i--;
       }
       media.moveToNext();
@@ -1340,6 +1657,13 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
       return null;
     }
 
+    if (hasVivoLivePhotoTrailer(sourceFile)) {
+      File vivoMp4 = findVivoCompanionVideo(sourceFile);
+      if (vivoMp4 != null) {
+        return Uri.fromFile(vivoMp4).toString();
+      }
+    }
+
     boolean hasHuaweiTrailer = hasHuaweiLivePhotoTrailer(sourceFile);
 
     String metadata = readMotionPhotoMetadata(sourceFile);
@@ -1417,6 +1741,10 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     }
 
     if (hasHuaweiLivePhotoTrailer(sourceFile)) {
+      return true;
+    }
+
+    if (hasVivoLivePhotoTrailer(sourceFile) && findVivoCompanionVideo(sourceFile) != null) {
       return true;
     }
 
@@ -1501,6 +1829,76 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     } catch (IOException e) {
       return false;
     }
+  }
+
+  /**
+   * Check whether a JPEG has a vivo live-photo trailer at the end.
+   * The trailer starts with {@code "vivo{"} and contains a JSON object
+   * with a non-empty {@code "com.android.camera.livephoto"} field.
+   */
+  private static boolean hasVivoLivePhotoTrailer(File file) {
+    long fileLen = file.length();
+    if (fileLen < 32) return false;
+    int scanLen = (int) Math.min(fileLen, VIVO_LIVE_PHOTO_TAIL_SCAN_BYTES);
+    try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+      raf.seek(fileLen - scanLen);
+      byte[] tail = new byte[scanLen];
+      int read = raf.read(tail);
+      if (read <= 0) return false;
+      String tailStr = new String(tail, 0, read, StandardCharsets.UTF_8);
+      int vivoIdx = tailStr.indexOf("vivo{");
+      if (vivoIdx < 0) return false;
+      int jsonStart = vivoIdx + 4;
+      int jsonEnd = tailStr.indexOf('}', jsonStart);
+      if (jsonEnd < 0) return false;
+      String json = tailStr.substring(jsonStart, jsonEnd + 1);
+      return json.contains("\"com.android.camera.livephoto\"")
+              && !json.contains("\"com.android.camera.livephoto\":\"\"");
+    } catch (Exception e) {
+      return false;
+    }
+  }
+
+  /**
+   * Locate the companion MP4 video for a vivo live-photo JPEG.
+   * vivo stores the video as a separate file with the same base name.
+   */
+  @Nullable
+  private static File findVivoCompanionVideo(File jpgFile) {
+    String name = jpgFile.getName();
+    int dot = name.lastIndexOf('.');
+    if (dot <= 0) return null;
+    String baseName = name.substring(0, dot);
+    File mp4 = new File(jpgFile.getParent(), baseName + ".mp4");
+    if (mp4.exists() && mp4.isFile()) return mp4;
+    File mp4Upper = new File(jpgFile.getParent(), baseName + ".MP4");
+    if (mp4Upper.exists() && mp4Upper.isFile()) return mp4Upper;
+    return null;
+  }
+
+  /**
+   * Return {@code true} if this video file is a vivo companion MP4 that
+   * should be hidden from results (the live photo JPEG is the primary asset).
+   */
+  private static boolean isVivoCompanionVideo(
+          @Nullable String filePath, @Nullable String mimeType) {
+    if (mimeType == null || !mimeType.startsWith("video") || TextUtils.isEmpty(filePath)) {
+      return false;
+    }
+    File videoFile = new File(filePath);
+    if (!videoFile.exists()) return false;
+    String name = videoFile.getName();
+    int dot = name.lastIndexOf('.');
+    if (dot <= 0) return false;
+    String baseName = name.substring(0, dot);
+    File parent = videoFile.getParentFile();
+    if (parent == null) return false;
+    File jpgFile = new File(parent, baseName + ".jpg");
+    if (!jpgFile.exists()) {
+      jpgFile = new File(parent, baseName + ".JPG");
+    }
+    if (!jpgFile.exists()) return false;
+    return hasVivoLivePhotoTrailer(jpgFile);
   }
 
   private static String readMotionPhotoMetadata(File sourceFile) {
