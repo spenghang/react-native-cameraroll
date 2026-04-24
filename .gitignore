@@ -3,6 +3,8 @@
 #
 .DS_Store
 
+.cursor
+
 # node.js
 #
 node_modules/

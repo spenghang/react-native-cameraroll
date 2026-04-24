@@ -94,6 +94,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
   private static final String MOTION_PHOTO_CACHE_DIR = "rn-cameraroll-motion-photo";
   private static final int MOTION_PHOTO_XMP_SCAN_BYTES = 512 * 1024;
   private static final int MOTION_PHOTO_VIDEO_SCAN_BYTES = 16 * 1024 * 1024;
+  private static final int HUAWEI_LIVE_PHOTO_TRAILER_SIZE = 60;
   private static final Pattern MICRO_VIDEO_OFFSET_PATTERN =
           Pattern.compile("(?:Camera|GCamera):MicroVideoOffset[^0-9]*(\\d+)");
   private static final Pattern MOTION_PHOTO_LENGTH_PATTERN =
@@ -119,6 +120,12 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
 
   public CameraRollModule(ReactApplicationContext reactContext) {
     super(reactContext);
+  }
+
+  private static boolean isHuaweiDevice() {
+    String manufacturer = Build.MANUFACTURER;
+    return manufacturer != null
+            && (manufacturer.equalsIgnoreCase("HUAWEI") || manufacturer.equalsIgnoreCase("HONOR"));
   }
 
   @Override
@@ -211,7 +218,15 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
         }
 
         long videoLength = videoFile.length();
-        if (!buildMotionPhotoFile(imageFile, videoFile, tempFile, videoLength)) {
+        boolean success;
+        if (isHuaweiDevice()) {
+          int[] videoMeta = extractVideoMetadata(videoFile);
+          success = buildHuaweiMotionPhotoFile(imageFile, videoFile, tempFile,
+                  videoLength, videoMeta[0], videoMeta[1]);
+        } else {
+          success = buildStandardMotionPhotoFile(imageFile, videoFile, tempFile, videoLength);
+        }
+        if (!success) {
           mPromise.reject(ERROR_UNABLE_TO_SAVE, "Failed to build motion photo payload");
           return;
         }
@@ -258,15 +273,10 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
   }
 
   /**
-   * Build a Motion Photo file by:
-   * 1. Injecting a Google/Samsung-compatible XMP APP1 segment right after the
-   *    JPEG SOI so that both {@code GCamera:MicroVideoOffset} and the
-   *    Container schema's {@code Item:Semantic="MotionPhoto"} markers are
-   *    present.
-   * 2. Streaming the remainder of the original JPEG.
-   * 3. Appending the raw MP4 bytes at the tail.
+   * Standard Motion Photo: inject Google/Samsung-compatible XMP into the
+   * JPEG header, then append the raw MP4. Works on Xiaomi, Google, Samsung.
    */
-  private static boolean buildMotionPhotoFile(
+  private static boolean buildStandardMotionPhotoFile(
           File imageFile,
           File videoFile,
           File outputFile,
@@ -302,9 +312,130 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
       out.flush();
       return true;
     } catch (IOException e) {
-      FLog.w(ReactConstants.TAG, "Could not build motion photo file", e);
+      FLog.w(ReactConstants.TAG, "Could not build standard motion photo file", e);
       return false;
     }
+  }
+
+  /**
+   * Huawei/Honor Motion Photo: copy JPEG and MP4 as-is, then append a
+   * 60-byte trailer that their Gallery recognises.
+   */
+  private static boolean buildHuaweiMotionPhotoFile(
+          File imageFile,
+          File videoFile,
+          File outputFile,
+          long videoLength,
+          int frameCount,
+          int durationMs) {
+    long mdatOffsetInVideo = findMdatOffset(videoFile);
+    long liveValue = videoLength - mdatOffsetInVideo + HUAWEI_LIVE_PHOTO_TRAILER_SIZE;
+
+    byte[] buffer = new byte[32 * 1024];
+    try (FileInputStream imageIn = new FileInputStream(imageFile);
+         FileOutputStream out = new FileOutputStream(outputFile)) {
+
+      int n;
+      while ((n = imageIn.read(buffer)) != -1) {
+        out.write(buffer, 0, n);
+      }
+
+      try (FileInputStream videoIn = new FileInputStream(videoFile)) {
+        while ((n = videoIn.read(buffer)) != -1) {
+          out.write(buffer, 0, n);
+        }
+      }
+
+      out.write(buildHuaweiLivePhotoTrailer(liveValue, frameCount, durationMs));
+      out.flush();
+      return true;
+    } catch (IOException e) {
+      FLog.w(ReactConstants.TAG, "Could not build Huawei motion photo file", e);
+      return false;
+    }
+  }
+
+  /**
+   * Find the byte offset of the mdat box within an MP4 file.
+   * Returns 0 if mdat is not found (falls back to entire video).
+   */
+  private static long findMdatOffset(File videoFile) {
+    try (RandomAccessFile raf = new RandomAccessFile(videoFile, "r")) {
+      long fileLen = raf.length();
+      long pos = 0;
+      while (pos + 8 <= fileLen) {
+        raf.seek(pos);
+        long boxSize = raf.readInt() & 0xFFFFFFFFL;
+        byte[] type = new byte[4];
+        raf.readFully(type);
+        if (boxSize == 1 && pos + 16 <= fileLen) {
+          boxSize = raf.readLong();
+        }
+        if (boxSize == 0) boxSize = fileLen - pos;
+        if (boxSize < 8) break;
+        if (type[0] == 'm' && type[1] == 'd' && type[2] == 'a' && type[3] == 't') {
+          return pos;
+        }
+        pos += boxSize;
+      }
+    } catch (IOException e) {
+      FLog.w(ReactConstants.TAG, "Could not find mdat in video file", e);
+    }
+    return 0;
+  }
+
+  /**
+   * Extract frame count and duration (ms) from a video file.
+   * Returns {@code int[]{frameCount, durationMs}}.
+   */
+  private static int[] extractVideoMetadata(File videoFile) {
+    int frameCount = 0;
+    int durationMs = 0;
+    MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+    try {
+      retriever.setDataSource(videoFile.getAbsolutePath());
+      String dur = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
+      if (dur != null) {
+        durationMs = Integer.parseInt(dur);
+      }
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        String fc = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT);
+        if (fc != null) {
+          frameCount = Integer.parseInt(fc);
+        }
+      }
+    } catch (Exception e) {
+      FLog.w(ReactConstants.TAG, "Could not extract video metadata for live photo trailer", e);
+    } finally {
+      try { retriever.release(); } catch (Exception ignored) { }
+    }
+    return new int[]{frameCount, durationMs};
+  }
+
+  /**
+   * Build the 60-byte trailer that Huawei/Honor Gallery uses to identify
+   * a live (motion) photo. The format is three left-justified,
+   * space-padded fields of 20 characters each:
+   * <pre>
+   *   v2_f{frameCount}      {pts}:{duration}      LIVE_{videoSize}
+   * </pre>
+   */
+  private static byte[] buildHuaweiLivePhotoTrailer(
+          long videoDataSize,
+          int frameCount,
+          int durationMs) {
+    String f1 = padRight("v2_f" + frameCount, 20);
+    String f2 = padRight("0:" + durationMs, 20);
+    String f3 = padRight("LIVE_" + videoDataSize, 20);
+    return (f1 + f2 + f3).getBytes(StandardCharsets.US_ASCII);
+  }
+
+  private static String padRight(String s, int width) {
+    if (s.length() >= width) return s.substring(0, width);
+    StringBuilder sb = new StringBuilder(width);
+    sb.append(s);
+    while (sb.length() < width) sb.append(' ');
+    return sb.toString();
   }
 
   @Nullable
@@ -377,6 +508,9 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
       if (hasAlbum) {
         values.put(MediaStore.MediaColumns.RELATIVE_PATH,
                 Environment.DIRECTORY_DCIM + File.separator + album);
+      } else if (isHuaweiDevice()) {
+        values.put(MediaStore.MediaColumns.RELATIVE_PATH,
+                Environment.DIRECTORY_DCIM + File.separator + "Camera");
       } else {
         values.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DCIM);
       }
@@ -404,6 +538,9 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
       if (hasAlbum) {
         exportDir = new File(Environment.getExternalStoragePublicDirectory(
                 Environment.DIRECTORY_PICTURES), album);
+      } else if (isHuaweiDevice()) {
+        exportDir = new File(Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DCIM), "Camera");
       } else {
         exportDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM);
       }
@@ -1203,13 +1340,10 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
       return null;
     }
 
-    String metadata = readMotionPhotoMetadata(sourceFile);
-    if (!containsMotionPhotoMarker(metadata)) {
-      return null;
-    }
+    boolean hasHuaweiTrailer = hasHuaweiLivePhotoTrailer(sourceFile);
 
-    long videoStartOffset = resolveMotionPhotoVideoStartOffset(sourceFile, metadata);
-    if (videoStartOffset <= 0 || videoStartOffset >= sourceFile.length()) {
+    String metadata = readMotionPhotoMetadata(sourceFile);
+    if (!hasHuaweiTrailer && !containsMotionPhotoMarker(metadata)) {
       return null;
     }
 
@@ -1217,17 +1351,56 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     if (!cacheDir.exists() && !cacheDir.mkdirs()) {
       return null;
     }
-
     File outputFile = buildMotionPhotoCacheFile(cacheDir, sourceFile);
+
+    if (hasHuaweiTrailer) {
+      return extractHuaweiMotionPhotoVideo(sourceFile, outputFile);
+    } else {
+      return extractStandardMotionPhotoVideo(sourceFile, metadata, outputFile);
+    }
+  }
+
+  /** Standard path: XMP-based offset, read to file end. */
+  @Nullable
+  private static String extractStandardMotionPhotoVideo(
+          File sourceFile, String metadata, File outputFile) {
+    long videoStartOffset = resolveMotionPhotoVideoStartOffset(sourceFile, metadata);
+    if (videoStartOffset <= 0 || videoStartOffset >= sourceFile.length()) {
+      return null;
+    }
     long expectedLength = sourceFile.length() - videoStartOffset;
     if (outputFile.exists() && outputFile.length() == expectedLength) {
       return Uri.fromFile(outputFile).toString();
     }
-
     if (!writeMotionPhotoVideoFile(sourceFile, outputFile, videoStartOffset)) {
       return null;
     }
+    return Uri.fromFile(outputFile).toString();
+  }
 
+  /** Huawei path: trailer-based offset, exclude 60-byte trailer. */
+  @Nullable
+  private static String extractHuaweiMotionPhotoVideo(
+          File sourceFile, File outputFile) {
+    long liveValue = parseHuaweiTrailerLiveValue(sourceFile);
+    long videoEndOffset = sourceFile.length() - HUAWEI_LIVE_PHOTO_TRAILER_SIZE;
+    long videoStartOffset;
+    if (liveValue > 0) {
+      long mdatApprox = sourceFile.length() - liveValue;
+      videoStartOffset = findFtypNear(sourceFile, mdatApprox);
+    } else {
+      videoStartOffset = findEmbeddedMp4StartOffset(sourceFile);
+    }
+    if (videoStartOffset <= 0 || videoStartOffset >= sourceFile.length()) {
+      return null;
+    }
+    long expectedLength = videoEndOffset - videoStartOffset;
+    if (outputFile.exists() && outputFile.length() == expectedLength) {
+      return Uri.fromFile(outputFile).toString();
+    }
+    if (!writeHuaweiMotionPhotoVideoFile(sourceFile, outputFile, videoStartOffset, videoEndOffset)) {
+      return null;
+    }
     return Uri.fromFile(outputFile).toString();
   }
 
@@ -1243,6 +1416,10 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
       return false;
     }
 
+    if (hasHuaweiLivePhotoTrailer(sourceFile)) {
+      return true;
+    }
+
     String metadata = readMotionPhotoMetadata(sourceFile);
     if (!containsMotionPhotoMarker(metadata)) {
       return false;
@@ -1256,6 +1433,74 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     return metadata.contains("MotionPhoto")
             || metadata.contains("MicroVideo")
             || metadata.contains("MotionPhoto_Data");
+  }
+
+  /**
+   * Parse the LIVE_ value from a Huawei trailer, or return -1.
+   * The value represents the distance from mdat start to file end.
+   */
+  private static long parseHuaweiTrailerLiveValue(File file) {
+    if (file.length() < HUAWEI_LIVE_PHOTO_TRAILER_SIZE) return -1;
+    try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+      raf.seek(file.length() - HUAWEI_LIVE_PHOTO_TRAILER_SIZE);
+      byte[] tail = new byte[HUAWEI_LIVE_PHOTO_TRAILER_SIZE];
+      raf.readFully(tail);
+      String trailer = new String(tail, StandardCharsets.US_ASCII);
+      int idx = trailer.indexOf("LIVE_");
+      if (idx < 0) return -1;
+      String numStr = trailer.substring(idx + 5).trim();
+      return Long.parseLong(numStr);
+    } catch (Exception e) {
+      return -1;
+    }
+  }
+
+  /**
+   * Scan for a JPEG ftyp box in the region before {@code mdatApprox}.
+   * Searches up to 4KB before the mdat position to find ftyp+free/etc.
+   */
+  private static long findFtypNear(File file, long mdatApprox) {
+    long searchStart = Math.max(0, mdatApprox - 4096);
+    int searchLen = (int) (mdatApprox - searchStart + 8);
+    try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+      raf.seek(searchStart);
+      byte[] buf = new byte[searchLen];
+      int read = raf.read(buf);
+      if (read <= 8) return -1;
+      for (int i = 0; i < read - 7; i++) {
+        if (buf[i] == 'f' && buf[i+1] == 't' && buf[i+2] == 'y' && buf[i+3] == 'p'
+                && isLikelyMp4Brand(buf, i + 4)) {
+          return searchStart + i - 4;
+        }
+      }
+    } catch (IOException e) {
+      FLog.w(ReactConstants.TAG, "Could not scan for ftyp near mdat", e);
+    }
+    return -1;
+  }
+
+  /**
+   * Check whether the file ends with a Huawei/Honor 60-byte live photo
+   * trailer. Known versions: {@code v2_f...} and {@code v3_f...}.
+   */
+  private static boolean hasHuaweiLivePhotoTrailer(File file) {
+    if (file.length() < HUAWEI_LIVE_PHOTO_TRAILER_SIZE) {
+      return false;
+    }
+    try (RandomAccessFile raf = new RandomAccessFile(file, "r")) {
+      raf.seek(file.length() - HUAWEI_LIVE_PHOTO_TRAILER_SIZE);
+      byte[] tail = new byte[HUAWEI_LIVE_PHOTO_TRAILER_SIZE];
+      raf.readFully(tail);
+      String trailer = new String(tail, StandardCharsets.US_ASCII);
+      return trailer.contains("LIVE_")
+              && trailer.length() >= 4
+              && trailer.charAt(0) == 'v'
+              && Character.isDigit(trailer.charAt(1))
+              && trailer.charAt(2) == '_'
+              && trailer.charAt(3) == 'f';
+    } catch (IOException e) {
+      return false;
+    }
   }
 
   private static String readMotionPhotoMetadata(File sourceFile) {
@@ -1368,7 +1613,9 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     return new File(cacheDir, cacheName);
   }
 
-  private static boolean writeMotionPhotoVideoFile(File sourceFile, File outputFile, long startOffset) {
+  /** Standard extraction: read from startOffset to end of file. */
+  private static boolean writeMotionPhotoVideoFile(
+          File sourceFile, File outputFile, long startOffset) {
     File tempFile = new File(outputFile.getAbsolutePath() + ".tmp");
     if (tempFile.exists() && !tempFile.delete()) {
       return false;
@@ -1386,6 +1633,46 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
       outputStream.flush();
     } catch (IOException e) {
       FLog.w(ReactConstants.TAG, "Could not export Motion Photo video for " + sourceFile, e);
+      tempFile.delete();
+      return false;
+    }
+
+    if (outputFile.exists() && !outputFile.delete()) {
+      tempFile.delete();
+      return false;
+    }
+
+    if (!tempFile.renameTo(outputFile)) {
+      tempFile.delete();
+      return false;
+    }
+
+    return true;
+  }
+
+  /** Huawei extraction: read from startOffset to endOffset (excluding trailer). */
+  private static boolean writeHuaweiMotionPhotoVideoFile(
+          File sourceFile, File outputFile, long startOffset, long endOffset) {
+    File tempFile = new File(outputFile.getAbsolutePath() + ".tmp");
+    if (tempFile.exists() && !tempFile.delete()) {
+      return false;
+    }
+
+    byte[] buffer = new byte[16 * 1024];
+    long remaining = endOffset - startOffset;
+    try (RandomAccessFile inputFile = new RandomAccessFile(sourceFile, "r");
+         FileOutputStream outputStream = new FileOutputStream(tempFile)) {
+      inputFile.seek(startOffset);
+
+      int bytesRead;
+      while (remaining > 0 && (bytesRead = inputFile.read(buffer, 0,
+              (int) Math.min(buffer.length, remaining))) != -1) {
+        outputStream.write(buffer, 0, bytesRead);
+        remaining -= bytesRead;
+      }
+      outputStream.flush();
+    } catch (IOException e) {
+      FLog.w(ReactConstants.TAG, "Could not export Huawei Motion Photo video for " + sourceFile, e);
       tempFile.delete();
       return false;
     }
