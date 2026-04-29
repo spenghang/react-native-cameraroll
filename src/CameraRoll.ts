@@ -216,6 +216,7 @@ export type Album = {
   count: number;
   type: AlbumType;
   subtype?: AlbumSubType;
+  isShared?: boolean;
 };
 
 export type ThumbnailSize = {

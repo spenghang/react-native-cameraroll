@@ -21,6 +21,7 @@ type Album = {
   count: number;
   type: AlbumType;
   subtype?: AlbumSubType;
+  isShared?: boolean;
 };
 
 type SubTypes =

@@ -721,22 +721,17 @@ RCT_EXPORT_METHOD(getAlbums:(NSDictionary *)params
   void (^convertAsset)(PHAssetCollection * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) =
     ^(PHAssetCollection * _Nonnull obj, NSUInteger idx, BOOL * _Nonnull stop) {
 
-//      PHFetchOptions *const assetFetchOptions = [RCTConvert PHFetchOptionsFromMediaType:mediaType fromTime:0 toTime:0];
-//      // Enumerate assets within the collection
-//      PHFetchResult<PHAsset *> *const assetsFetchResult = [PHAsset fetchAssetsInAssetCollection:obj options:assetFetchOptions];
-//      if (assetsFetchResult.count > 0) {
-//        [result addObject:@{
-//          @"title": [obj localizedTitle],
-//          @"count": @(assetsFetchResult.count),
-//          @"type": fetchedAlbumType
-//        }];
-//      }
-
+      BOOL isShared = (obj.assetCollectionSubtype == PHAssetCollectionSubtypeAlbumCloudShared);
+      PHFetchOptions *const assetFetchOptions = [RCTConvert PHFetchOptionsFromMediaType:mediaType fromTime:0 toTime:0];
+      PHFetchResult<PHAsset *> *const assetsFetchResult = [PHAsset fetchAssetsInAssetCollection:obj options:assetFetchOptions];
+      if (assetsFetchResult.count > 0) {
         [result addObject:@{
           @"title": [obj localizedTitle],
-          @"count": @(0),
-          @"type": fetchedAlbumType
+          @"count": @(assetsFetchResult.count),
+          @"type": fetchedAlbumType,
+          @"isShared": @(isShared)
         }];
+      }
     };
 
   PHFetchOptions* options = [[PHFetchOptions alloc] init];
