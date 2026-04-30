@@ -255,6 +255,7 @@ Returns a Promise with photo identifier objects from the local camera roll of th
   * `Videos`
   * `Photos` // default
   * `Live` // only returns Live Photos / Motion Photos
+* `detectLivePhoto` : {boolean} : Detect Live Photos / Motion Photos in regular results and add `PhotoLive` to `subTypes`. Defaults to `false`. Android only.
 * `mimeTypes` : {Array} : Filter by mimetype (e.g. image/jpeg). Note that using this will reduce performance slightly on iOS.
 * `fromTime` : {number} : Filter by creation time with a timestamp in milliseconds. This time is exclusive, so we'll select all photos with `timestamp > fromTime`.
 * `toTime` : {number} : Filter by creation time with a timestamp in milliseconds. This time is inclusive, so we'll select all photos with `timestamp <= toTime`.
@@ -274,7 +275,7 @@ Returns a Promise which when resolved will be of the following shape:
   * `node`: {object} An object with the following shape:
     * `id`: {string} : A local identifier. Correspond to `Media._ID` on Android and `localIdentifier` on iOS.
     * `type`: {string}
-    * `subTypes`: {Array<string>} : An array of subtype strings (see `SubTypes` type). Always [] on Android.
+    * `subTypes`: {Array<string>} : An array of subtype strings (see `SubTypes` type). On Android, Live Photos / Motion Photos are reported as `PhotoLive` when using `assetType: 'Live'` or `detectLivePhoto: true`.
     * `group_name`: {Array<string>} : An array of albums containing the element. Always 1 element on Android. 0 to n elements on iOS.
     * `image`: {object} : An object with the following shape:
       * `uri`: {string}

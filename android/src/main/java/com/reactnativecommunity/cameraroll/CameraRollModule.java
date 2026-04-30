@@ -1186,6 +1186,10 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
    *                    the camera roll. Valid values are "Photos", "Videos", or "Live".
    *                    Defaults to photos.
    *                  </li>
+   *                  <li>
+   *                    detectLivePhoto (optional): detects live photos in regular result sets.
+   *                    Defaults to false.
+   *                  </li>
    *                </ul>
    * @param promise the Promise to be resolved when the photos are loaded; for a format of the
    *                parameters passed to this callback, see {@code getPhotosReturnChecker} in CameraRoll.js
@@ -1202,6 +1206,9 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
             ? params.getArray("mimeTypes")
             : null;
     ReadableArray include = params.hasKey("include") ? params.getArray("include") : null;
+    boolean detectLivePhoto = params.hasKey("detectLivePhoto")
+            && !params.isNull("detectLivePhoto")
+            && params.getBoolean("detectLivePhoto");
 
     new GetMediaTask(
             getReactApplicationContext(),
@@ -1213,6 +1220,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
             fromTime,
             toTime,
             include,
+            detectLivePhoto,
             promise)
             .executeOnExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
   }
@@ -1231,6 +1239,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     private final long mFromTime;
     private final long mToTime;
     private final Set<String> mInclude;
+    private final boolean mDetectLivePhoto;
 
     private GetMediaTask(
             ReactContext context,
@@ -1242,6 +1251,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
             long fromTime,
             long toTime,
             @Nullable ReadableArray include,
+            boolean detectLivePhoto,
             Promise promise) {
       super(context);
       mContext = context;
@@ -1254,6 +1264,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
       mFromTime = fromTime;
       mToTime = toTime;
       mInclude = createSetFromIncludeArray(include);
+      mDetectLivePhoto = detectLivePhoto;
     }
 
     private static Set<String> createSetFromIncludeArray(@Nullable ReadableArray includeArray) {
@@ -1376,7 +1387,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
               int offset = !TextUtils.isEmpty(mAfter) ? Integer.parseInt(mAfter) : 0;
               putLivePhotoEdges(resolver, media, response, mFirst, mInclude, offset);
             } else {
-              putEdges(resolver, media, response, mFirst, mInclude);
+              putEdges(resolver, media, response, mFirst, mInclude, mDetectLivePhoto);
               putPageInfo(media, response, mFirst, !TextUtils.isEmpty(mAfter) ? Integer.parseInt(mAfter) : 0);
             }
           } finally {
@@ -1491,7 +1502,8 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
           Cursor media,
           WritableMap response,
           int limit,
-          Set<String> include) {
+          Set<String> include,
+          boolean detectLivePhoto) {
     WritableArray edges = new WritableNativeArray();
     media.moveToFirst();
     int idIndex = media.getColumnIndex(Images.Media._ID);
@@ -1535,7 +1547,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
                       mimeTypeIndex, includeFilename, includeFileSize, includeFileExtension, includeImageSize,
                       includePlayableDuration, includeOrientation);
       if (imageInfoSuccess) {
-        boolean isLivePhoto = isMotionPhotoAsset(
+        boolean isLivePhoto = detectLivePhoto && isMotionPhotoAsset(
                 currentPath,
                 currentMime,
                 getMotionPhotoMetadataFromCursor(media, xmpIndex),

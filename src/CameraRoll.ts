@@ -103,6 +103,12 @@ export type GetPhotosParams = {
   assetType?: GetPhotosAssetType;
 
   /**
+   * Detect Live Photos / Motion Photos in regular results. Android only.
+   * Defaults to false.
+   */
+  detectLivePhoto?: boolean;
+
+  /**
    * Earliest time to get photos from. A timestamp in milliseconds. Exclusive.
    */
   fromTime?: number;
