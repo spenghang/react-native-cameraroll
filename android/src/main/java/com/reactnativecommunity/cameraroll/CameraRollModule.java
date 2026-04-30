@@ -103,7 +103,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
   private static final Pattern MOTION_PHOTO_LENGTH_PATTERN_REVERSED =
           Pattern.compile("Item:Length=\"(\\d+)\"[^>]*Item:Semantic=\"MotionPhoto\"");
 
-  private static final String[] PROJECTION = {
+  private static final String[] BASE_PROJECTION = {
           Images.Media._ID,
           Images.Media.MIME_TYPE,
           Images.Media.BUCKET_DISPLAY_NAME,
@@ -117,10 +117,29 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
           MediaStore.MediaColumns.ORIENTATION,
   };
 
+  private static final String[] PROJECTION_WITH_XMP = {
+          Images.Media._ID,
+          Images.Media.MIME_TYPE,
+          Images.Media.BUCKET_DISPLAY_NAME,
+          Images.Media.DATE_TAKEN,
+          MediaStore.MediaColumns.DATE_ADDED,
+          MediaStore.MediaColumns.DATE_MODIFIED,
+          MediaStore.MediaColumns.WIDTH,
+          MediaStore.MediaColumns.HEIGHT,
+          MediaStore.MediaColumns.SIZE,
+          MediaStore.MediaColumns.DATA,
+          MediaStore.MediaColumns.ORIENTATION,
+          MediaStore.MediaColumns.XMP,
+  };
+
   private static final String SELECTION_BUCKET = Images.Media.BUCKET_DISPLAY_NAME + " = ?";
 
   public CameraRollModule(ReactApplicationContext reactContext) {
     super(reactContext);
+  }
+
+  private static String[] getMediaProjection() {
+    return Build.VERSION.SDK_INT >= Build.VERSION_CODES.R ? PROJECTION_WITH_XMP : BASE_PROJECTION;
   }
 
   private static boolean isHuaweiDevice() {
@@ -1328,7 +1347,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
           }
           media = resolver.query(
                   MediaStore.Files.getContentUri("external"),
-                  PROJECTION,
+                  getMediaProjection(),
                   bundle,
                   null);
         } else {
@@ -1343,7 +1362,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
           }
           media = resolver.query(
                   mediaStoreUri,
-                  PROJECTION,
+                  getMediaProjection(),
                   selection.toString(),
                   selectionArgs.toArray(new String[selectionArgs.size()]),
                   Images.Media.DATE_ADDED + " DESC, " + Images.Media.DATE_MODIFIED + " DESC");
@@ -1486,6 +1505,9 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     int sizeIndex = media.getColumnIndex(MediaStore.MediaColumns.SIZE);
     int dataIndex = media.getColumnIndex(MediaStore.MediaColumns.DATA);
     int orientationIndex = media.getColumnIndex(MediaStore.MediaColumns.ORIENTATION);
+    int xmpIndex = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+            ? media.getColumnIndex(MediaStore.MediaColumns.XMP)
+            : -1;
 
     boolean includeLocation = include.contains(INCLUDE_LOCATION);
     boolean includeFilename = include.contains(INCLUDE_FILENAME);
@@ -1513,7 +1535,12 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
                       mimeTypeIndex, includeFilename, includeFileSize, includeFileExtension, includeImageSize,
                       includePlayableDuration, includeOrientation);
       if (imageInfoSuccess) {
-        boolean isLivePhoto = isMotionPhotoAsset(currentPath, currentMime);
+        boolean isLivePhoto = isMotionPhotoAsset(
+                currentPath,
+                currentMime,
+                getMotionPhotoMetadataFromCursor(media, xmpIndex),
+                xmpIndex >= 0,
+                false);
         putBasicNodeInfo(media, node, idIndex, mimeTypeIndex, groupNameIndex, dateTakenIndex, dateAddedIndex, dateModifiedIndex, includeAlbums, isLivePhoto);
         putLocationInfo(media, node, dataIndex, includeLocation, mimeTypeIndex, resolver);
 
@@ -1546,6 +1573,9 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     int sizeIndex = media.getColumnIndex(MediaStore.MediaColumns.SIZE);
     int dataIndex = media.getColumnIndex(MediaStore.MediaColumns.DATA);
     int orientationIndex = media.getColumnIndex(MediaStore.MediaColumns.ORIENTATION);
+    int xmpIndex = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+            ? media.getColumnIndex(MediaStore.MediaColumns.XMP)
+            : -1;
 
     if (!media.moveToPosition(offset)) {
       response.putArray("edges", edges);
@@ -1558,7 +1588,12 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     int collected = 0;
 
     do {
-      if (isMotionPhotoAsset(media.getString(dataIndex), media.getString(mimeTypeIndex))) {
+      if (isMotionPhotoAsset(
+              media.getString(dataIndex),
+              media.getString(mimeTypeIndex),
+              getMotionPhotoMetadataFromCursor(media, xmpIndex),
+              xmpIndex >= 0,
+              false)) {
         if (collected == limit) {
           hasNextPage = true;
           endCursor = Integer.toString(media.getPosition());
@@ -1797,7 +1832,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
   @Nullable
   private static String extractStandardMotionPhotoVideo(
           File sourceFile, String metadata, File outputFile) {
-    long videoStartOffset = resolveMotionPhotoVideoStartOffset(sourceFile, metadata);
+    long videoStartOffset = resolveMotionPhotoVideoStartOffset(sourceFile, metadata, true);
     if (videoStartOffset <= 0 || videoStartOffset >= sourceFile.length()) {
       return null;
     }
@@ -1840,8 +1875,21 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
   private static boolean isMotionPhotoAsset(
           @Nullable String filePath,
           @Nullable String mimeType) {
+    return isMotionPhotoAsset(filePath, mimeType, null, false, true);
+  }
+
+  private static boolean isMotionPhotoAsset(
+          @Nullable String filePath,
+          @Nullable String mimeType,
+          @Nullable String indexedMetadata,
+          boolean hasIndexedMetadataColumn,
+          boolean allowEmbeddedVideoScan) {
     if (mimeType == null || !mimeType.startsWith("image") || TextUtils.isEmpty(filePath)) {
       return false;
+    }
+
+    if (containsMotionPhotoSignal(indexedMetadata)) {
+      return true;
     }
 
     File sourceFile = new File(filePath);
@@ -1857,12 +1905,20 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
       return true;
     }
 
+    if (hasIndexedMetadataColumn) {
+      return false;
+    }
+
     String metadata = readMotionPhotoMetadata(sourceFile);
+    if (containsMotionPhotoSignal(metadata)) {
+      return true;
+    }
+
     if (!containsMotionPhotoMarker(metadata)) {
       return false;
     }
 
-    long videoStartOffset = resolveMotionPhotoVideoStartOffset(sourceFile, metadata);
+    long videoStartOffset = resolveMotionPhotoVideoStartOffset(sourceFile, metadata, allowEmbeddedVideoScan);
     return videoStartOffset > 0 && videoStartOffset < sourceFile.length();
   }
 
@@ -1870,6 +1926,39 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     return metadata.contains("MotionPhoto")
             || metadata.contains("MicroVideo")
             || metadata.contains("MotionPhoto_Data");
+  }
+
+  private static boolean containsMotionPhotoSignal(@Nullable String metadata) {
+    if (TextUtils.isEmpty(metadata)) {
+      return false;
+    }
+
+    return metadata.contains("MotionPhoto=\"1\"")
+            || metadata.contains("MotionPhoto='1'")
+            || metadata.contains("MicroVideo=\"1\"")
+            || metadata.contains("MicroVideo='1'")
+            || metadata.contains("Item:Semantic=\"MotionPhoto\"")
+            || metadata.contains("Item:Semantic='MotionPhoto'")
+            || metadata.contains(">MotionPhoto<")
+            || metadata.contains("MotionPhoto_Data")
+            || metadata.contains("OLivePhotoVersion");
+  }
+
+  @Nullable
+  private static String getMotionPhotoMetadataFromCursor(Cursor media, int xmpIndex) {
+    if (xmpIndex < 0 || media.isNull(xmpIndex)) {
+      return null;
+    }
+
+    try {
+      if (media.getType(xmpIndex) == Cursor.FIELD_TYPE_BLOB) {
+        byte[] xmp = media.getBlob(xmpIndex);
+        return xmp != null ? new String(xmp, StandardCharsets.UTF_8) : null;
+      }
+      return media.getString(xmpIndex);
+    } catch (RuntimeException e) {
+      return null;
+    }
   }
 
   /**
@@ -2029,7 +2118,10 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     }
   }
 
-  private static long resolveMotionPhotoVideoStartOffset(File sourceFile, String metadata) {
+  private static long resolveMotionPhotoVideoStartOffset(
+          File sourceFile,
+          String metadata,
+          boolean allowEmbeddedVideoScan) {
     long fileLength = sourceFile.length();
 
     long microVideoOffset = parseLongAttribute(metadata, MICRO_VIDEO_OFFSET_PATTERN);
@@ -2045,7 +2137,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
       return fileLength - motionPhotoLength;
     }
 
-    return findEmbeddedMp4StartOffset(sourceFile);
+    return allowEmbeddedVideoScan ? findEmbeddedMp4StartOffset(sourceFile) : -1;
   }
 
   private static long parseLongAttribute(String value, Pattern pattern) {
