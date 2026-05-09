@@ -150,7 +150,8 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
 
   private static boolean isVivoDevice() {
     String manufacturer = Build.MANUFACTURER;
-    return manufacturer != null && manufacturer.equalsIgnoreCase("vivo");
+    return manufacturer != null
+            && (manufacturer.equalsIgnoreCase("vivo") || manufacturer.equalsIgnoreCase("iQOO"));
   }
 
   private static boolean isOppoDevice() {
@@ -1547,12 +1548,11 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
                       mimeTypeIndex, includeFilename, includeFileSize, includeFileExtension, includeImageSize,
                       includePlayableDuration, includeOrientation);
       if (imageInfoSuccess) {
-        boolean isLivePhoto = detectLivePhoto && isMotionPhotoAsset(
-                currentPath,
-                currentMime,
-                getMotionPhotoMetadataFromCursor(media, xmpIndex),
-                xmpIndex >= 0,
-                false);
+        boolean isLivePhoto = detectLivePhoto
+                && isMotionPhotoAssetFromFastMetadata(
+                        currentPath,
+                        currentMime,
+                        getMotionPhotoMetadataFromCursor(media, xmpIndex));
         putBasicNodeInfo(media, node, idIndex, mimeTypeIndex, groupNameIndex, dateTakenIndex, dateAddedIndex, dateModifiedIndex, includeAlbums, isLivePhoto);
         putLocationInfo(media, node, dataIndex, includeLocation, mimeTypeIndex, resolver);
 
@@ -1600,12 +1600,10 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     int collected = 0;
 
     do {
-      if (isMotionPhotoAsset(
+      if (isMotionPhotoAssetFromFastMetadata(
               media.getString(dataIndex),
               media.getString(mimeTypeIndex),
-              getMotionPhotoMetadataFromCursor(media, xmpIndex),
-              xmpIndex >= 0,
-              false)) {
+              getMotionPhotoMetadataFromCursor(media, xmpIndex))) {
         if (collected == limit) {
           hasNextPage = true;
           endCursor = Integer.toString(media.getPosition());
@@ -1884,19 +1882,11 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     return Uri.fromFile(outputFile).toString();
   }
 
-  private static boolean isMotionPhotoAsset(
-          @Nullable String filePath,
-          @Nullable String mimeType) {
-    return isMotionPhotoAsset(filePath, mimeType, null, false, true);
-  }
-
-  private static boolean isMotionPhotoAsset(
+  private static boolean isMotionPhotoAssetFromFastMetadata(
           @Nullable String filePath,
           @Nullable String mimeType,
-          @Nullable String indexedMetadata,
-          boolean hasIndexedMetadataColumn,
-          boolean allowEmbeddedVideoScan) {
-    if (mimeType == null || !mimeType.startsWith("image") || TextUtils.isEmpty(filePath)) {
+          @Nullable String indexedMetadata) {
+    if (mimeType == null || !mimeType.startsWith("image")) {
       return false;
     }
 
@@ -1904,34 +1894,24 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
       return true;
     }
 
+    if (TextUtils.isEmpty(filePath)) {
+      return false;
+    }
+
     File sourceFile = new File(filePath);
-    if (!sourceFile.exists() || !sourceFile.isFile()) {
+    if (!sourceFile.isFile()) {
       return false;
     }
 
-    if (hasHuaweiLivePhotoTrailer(sourceFile)) {
-      return true;
+    if (isHuaweiDevice()) {
+      return hasHuaweiLivePhotoTrailer(sourceFile);
     }
 
-    if (hasVivoLivePhotoTrailer(sourceFile) && findVivoCompanionVideo(sourceFile) != null) {
-      return true;
+    if (isVivoDevice() && hasVivoCompanionVideo(sourceFile)) {
+      return hasVivoLivePhotoTrailer(sourceFile);
     }
 
-    if (hasIndexedMetadataColumn) {
-      return false;
-    }
-
-    String metadata = readMotionPhotoMetadata(sourceFile);
-    if (containsMotionPhotoSignal(metadata)) {
-      return true;
-    }
-
-    if (!containsMotionPhotoMarker(metadata)) {
-      return false;
-    }
-
-    long videoStartOffset = resolveMotionPhotoVideoStartOffset(sourceFile, metadata, allowEmbeddedVideoScan);
-    return videoStartOffset > 0 && videoStartOffset < sourceFile.length();
+    return false;
   }
 
   private static boolean containsMotionPhotoMarker(String metadata) {
@@ -2084,6 +2064,10 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     File mp4Upper = new File(jpgFile.getParent(), baseName + ".MP4");
     if (mp4Upper.exists() && mp4Upper.isFile()) return mp4Upper;
     return null;
+  }
+
+  private static boolean hasVivoCompanionVideo(File jpgFile) {
+    return findVivoCompanionVideo(jpgFile) != null;
   }
 
   /**
