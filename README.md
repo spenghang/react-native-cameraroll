@@ -553,7 +553,7 @@ function Example() {
 
 **iOS only**
 
-Returns a Promise with thumbnail photo.
+Returns a Promise with a local thumbnail photo URI.
 
 **Parameters:**
 
@@ -574,7 +574,7 @@ Returns a Promise with thumbnail photo.
 | ------------------------- | ------------------------------------------------------------- |
 | Promise\<PhotoThumbnail\> | A Promise with PhotoThumbnail with the shape described below. |
 
-* `thumbnailBase64` : {string}
+* `thumbnailUri` : {string}
 
 #### Example
 
@@ -582,7 +582,7 @@ Loading a thumbnail:
 
 ```javascript
 export default function Thumbnail(props) {
-  const [base64Image, setBase64Image] = useState(null);
+  const [thumbnailUri, setThumbnailUri] = useState(null);
 
   useEffect(() => {
     const getThumbnail = async () => {
@@ -597,28 +597,15 @@ export default function Thumbnail(props) {
 
       const thumbnailResponse = await CameraRoll.getPhotoThumbnail(props.image.uri, options);
 
-      setBase64Image(thumbnailResponse.thumbnailBase64);
+      setThumbnailUri(thumbnailResponse.thumbnailUri);
     };
 
     getThumbnail();
   }, []);
 
-  const extension = props.image.extension;
-  let prefix;
-
-  switch (extension) {
-    case 'png':
-      prefix = 'data:image/png;base64,';
-      break;
-    default:
-      //all others can use jpeg
-      prefix = 'data:image/jpeg;base64,';
-      break;
-  }
-
   return (
     <Image
-      source={{ uri: `${prefix}${base64Image}` }}
+      source={{ uri: thumbnailUri }}
     />
   );
 }

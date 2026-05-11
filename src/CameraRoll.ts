@@ -134,14 +134,13 @@ export type PhotoIdentifier = {
   node: {
     id: string;
     type: string;
-    subTypes: SubTypes;
+    subTypes: SubTypes[];
     group_name: string[];
     image: {
       filename: string | null;
       filepath: string | null;
       extension: string | null;
       uri: string;
-      thumbUri?: string;
       height: number;
       width: number;
       fileSize: number | null;
@@ -237,7 +236,7 @@ export type PhotoThumbnailOptions = {
 };
 
 export type PhotoThumbnail = {
-  thumbnailBase64: string,
+  thumbnailUri: string,
 };
 
 export type PhotoVideoURI = {

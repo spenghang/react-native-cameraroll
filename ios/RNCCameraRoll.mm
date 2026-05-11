@@ -917,61 +917,33 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
           CLLocation *const loc = asset.location;
           NSString *localIdentifier = asset.localIdentifier;
 
-          // Request thumbnail
-          PHImageManager *imageManager = [PHImageManager defaultManager];
-          PHImageRequestOptions *options = [[PHImageRequestOptions alloc] init];
-          options.synchronous = YES;
-          options.resizeMode = PHImageRequestOptionsResizeModeFast;
-          options.deliveryMode = PHImageRequestOptionsDeliveryModeHighQualityFormat;
-          [imageManager requestImageForAsset:asset
-                                  targetSize:CGSizeMake(360, 360) // Set your desired thumbnail size
-                                 contentMode:PHImageContentModeAspectFill
-                                     options:options
-                               resultHandler:^(UIImage * _Nullable result, NSDictionary * _Nullable info) {
-
-              NSString *thumbnailPath = uri;
-              if(result){
-                  @try {
-                      // Save thumbnail to temporary directory
-                      NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
-                      NSString *documentsDirectory = [paths objectAtIndex:0];
-                      thumbnailPath = [documentsDirectory stringByAppendingPathComponent:[NSString stringWithFormat:@"%@.jpg", [[localIdentifier componentsSeparatedByString:@"/"] firstObject]]];
-                      NSData *imageData = UIImageJPEGRepresentation(result, 0.8);
-                      [imageData writeToFile:thumbnailPath atomically:YES];
-                  } @catch (NSException *exception) {
-                      NSLog(@"Error saving thumbnail: %@", exception);
-                  }
-              }
-
-              [assets addObject:@{
-                @"node": @{
-                    @"id": localIdentifier,
-                    @"type": assetMediaTypeLabel, // TODO: switch to mimeType?
-                    @"subTypes": assetMediaSubtypesLabel,
-                    @"group_name": albums,
-                    @"image": @{
-                        @"uri": uri,
-                        @"thumbUri": thumbnailPath,
-                        @"extension": (includeFileExtension ? fileExtension : [NSNull null]),
-                        @"filename": (includeFilename && originalFilename ? originalFilename : [NSNull null]),
-                        @"height": (includeImageSize ? @([asset pixelHeight]) : [NSNull null]),
-                        @"width": (includeImageSize ? @([asset pixelWidth]) : [NSNull null]),
-                        @"fileSize": (includeFileSize && fileSize ? fileSize : [NSNull null]),
-                        @"playableDuration": (includePlayableDuration && asset.mediaType != PHAssetMediaTypeImage
-                            ? @([asset duration]) // fractional seconds
-                            : [NSNull null])
-                    },
-                    @"timestamp": @(asset.creationDate.timeIntervalSince1970),
-                    @"modificationTimestamp": @(asset.modificationDate.timeIntervalSince1970),
-                    @"location": (includeLocation && loc ? @{
-                        @"latitude": @(loc.coordinate.latitude),
-                        @"longitude": @(loc.coordinate.longitude),
-                        @"altitude": @(loc.altitude),
-                        @"heading": @(loc.course),
-                        @"speed": @(loc.speed), // speed in m/s
-                    } : [NSNull null])
-                }
-              }];
+          [assets addObject:@{
+            @"node": @{
+                @"id": localIdentifier,
+                @"type": assetMediaTypeLabel, // TODO: switch to mimeType?
+                @"subTypes": assetMediaSubtypesLabel,
+                @"group_name": albums,
+                @"image": @{
+                    @"uri": uri,
+                    @"extension": (includeFileExtension ? fileExtension : [NSNull null]),
+                    @"filename": (includeFilename && originalFilename ? originalFilename : [NSNull null]),
+                    @"height": (includeImageSize ? @([asset pixelHeight]) : [NSNull null]),
+                    @"width": (includeImageSize ? @([asset pixelWidth]) : [NSNull null]),
+                    @"fileSize": (includeFileSize && fileSize ? fileSize : [NSNull null]),
+                    @"playableDuration": (includePlayableDuration && asset.mediaType != PHAssetMediaTypeImage
+                        ? @([asset duration]) // fractional seconds
+                        : [NSNull null])
+                },
+                @"timestamp": @(asset.creationDate.timeIntervalSince1970),
+                @"modificationTimestamp": @(asset.modificationDate.timeIntervalSince1970),
+                @"location": (includeLocation && loc ? @{
+                    @"latitude": @(loc.coordinate.latitude),
+                    @"longitude": @(loc.coordinate.longitude),
+                    @"altitude": @(loc.altitude),
+                    @"heading": @(loc.course),
+                    @"speed": @(loc.speed), // speed in m/s
+                } : [NSNull null])
+            }
           }];
       };
 
@@ -1286,12 +1258,36 @@ RCT_EXPORT_METHOD(getPhotoThumbnail:(NSString *)internalId
                 NSError *const error = [info objectForKey:PHImageErrorKey];
                 if (error) {
                     reject(@"Error while getting thumbnail image",@"Error while getting thumbnail image",error);
+                    return;
                 }
 
-                NSString *thumbnailBase64 = [UIImageJPEGRepresentation(image, quality) base64EncodedStringWithOptions:NSDataBase64EncodingEndLineWithLineFeed];
+                if (image == nil) {
+                    NSError *imageError = RCTErrorWithMessage(@"Failed to load thumbnail image.");
+                    reject(@"No thumbnail image",@"No thumbnail image",imageError);
+                    return;
+                }
+
+                NSData *thumbnailData = UIImageJPEGRepresentation(image, quality);
+                if (thumbnailData == nil) {
+                    NSError *encodingError = RCTErrorWithMessage(@"Failed to encode thumbnail image.");
+                    reject(@"Error while encoding thumbnail image",@"Error while encoding thumbnail image",encodingError);
+                    return;
+                }
+
+                NSString *thumbnailFilename = [NSString stringWithFormat:@"RNCCameraRoll-thumbnail-%@.jpg", [NSUUID UUID].UUIDString];
+                NSString *thumbnailPath = [NSTemporaryDirectory() stringByAppendingPathComponent:thumbnailFilename];
+                NSError *writeError = nil;
+                BOOL didWrite = [thumbnailData writeToFile:thumbnailPath options:NSDataWritingAtomic error:&writeError];
+                if (!didWrite) {
+                    if (writeError == nil) {
+                        writeError = RCTErrorWithMessage(@"Failed to save thumbnail image.");
+                    }
+                    reject(@"Error while saving thumbnail image",@"Error while saving thumbnail image",writeError);
+                    return;
+                }
 
                 resolve(@{
-                    @"thumbnailBase64": thumbnailBase64
+                    @"thumbnailUri": [[NSURL fileURLWithPath:thumbnailPath] absoluteString]
                 });
             }];
         } else {

@@ -38,7 +38,7 @@ type PhotoIdentifier = {
   node: {
     id: string;
     type: string;
-    subTypes: SubTypes;
+    subTypes: SubTypes[];
     group_name: string[];
     image: {
       filename: string | null;
