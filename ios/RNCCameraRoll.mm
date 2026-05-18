@@ -1074,7 +1074,7 @@ RCT_EXPORT_METHOD(getPhotoByInternalID:(NSString *)internalId
         // convert to JPEG
         PHImageRequestOptions *const requestOptions = [PHImageRequestOptions new];
         requestOptions.networkAccessAllowed = YES;
-        requestOptions.version = PHImageRequestOptionsVersionUnadjusted;
+        requestOptions.version = PHImageRequestOptionsVersionCurrent;
         requestOptions.deliveryMode = PHImageRequestOptionsDeliveryModeHighQualityFormat;
 
         CGSize const targetSize = CGSizeMake((CGFloat)asset.pixelWidth, (CGFloat)asset.pixelHeight);
@@ -1245,7 +1245,7 @@ RCT_EXPORT_METHOD(getPhotoThumbnail:(NSString *)internalId
         if(asset){
             PHImageRequestOptions *const requestOptions = [PHImageRequestOptions new];
             requestOptions.networkAccessAllowed = allowNetworkAccess;
-            requestOptions.version = PHImageRequestOptionsVersionUnadjusted;
+            requestOptions.version = PHImageRequestOptionsVersionCurrent;
             requestOptions.deliveryMode = PHImageRequestOptionsDeliveryModeHighQualityFormat;
 
             CGSize const thumbnailSize = CGSizeMake(targetWidth, targetHeight);
