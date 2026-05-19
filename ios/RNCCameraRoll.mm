@@ -641,6 +641,7 @@ RCT_EXPORT_METHOD(saveLivePhoto:(NSDictionary *)options
       void (^performSave)(PHAssetCollection *collection) = ^(PHAssetCollection *collection) {
         [[PHPhotoLibrary sharedPhotoLibrary] performChanges:^{
           PHAssetCreationRequest *request = [PHAssetCreationRequest creationRequestForAsset];
+          request.creationDate = [NSDate date];
           PHAssetResourceCreationOptions *imageOptions = [[PHAssetResourceCreationOptions alloc] init];
           imageOptions.shouldMoveFile = YES;
           [request addResourceWithType:PHAssetResourceTypePhoto
