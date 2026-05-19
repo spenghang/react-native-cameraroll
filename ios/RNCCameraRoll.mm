@@ -1226,6 +1226,8 @@ RCT_EXPORT_METHOD(getPhotoThumbnail:(NSString *)internalId
     CGFloat const targetWidth = targetSize[@"width"] == nil ? 400 : [RCTConvert CGFloat:targetSize[@"width"]];
 
     CGFloat quality = options[@"quality"] == nil ? 1.0 : [RCTConvert CGFloat:options[@"quality"]];
+    NSString *cacheDirectory = options[@"cacheDirectory"] == nil ? nil : [RCTConvert NSString:options[@"cacheDirectory"]];
+    NSString *cacheKey = options[@"cacheKey"] == nil ? nil : [RCTConvert NSString:options[@"cacheKey"]];
 
     requestPhotoLibraryAccess(reject, ^(bool isLimited){
 
@@ -1244,6 +1246,32 @@ RCT_EXPORT_METHOD(getPhotoThumbnail:(NSString *)internalId
         }
 
         if(asset){
+            NSString *thumbnailCacheDirectory = [self thumbnailCacheDirectory:cacheDirectory];
+            NSError *directoryError = nil;
+            BOOL didCreateDirectory = [[NSFileManager defaultManager] createDirectoryAtPath:thumbnailCacheDirectory
+                                                                withIntermediateDirectories:YES
+                                                                                 attributes:nil
+                                                                                      error:&directoryError];
+            if (!didCreateDirectory) {
+                if (directoryError == nil) {
+                    directoryError = RCTErrorWithMessage(@"Failed to create thumbnail cache directory.");
+                }
+                reject(@"Error while creating thumbnail cache directory",
+                       @"Error while creating thumbnail cache directory",
+                       directoryError);
+                return;
+            }
+
+            NSString *thumbnailFilename = [NSString stringWithFormat:@"RNCCameraRoll-thumbnail-%@.jpg",
+                                           [self safeThumbnailCacheKey:cacheKey ?: [self thumbnailCacheKeyForAsset:asset]]];
+            NSString *thumbnailPath = [thumbnailCacheDirectory stringByAppendingPathComponent:thumbnailFilename];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:thumbnailPath]) {
+                resolve(@{
+                    @"thumbnailUri": [[NSURL fileURLWithPath:thumbnailPath] absoluteString]
+                });
+                return;
+            }
+
             PHImageRequestOptions *const requestOptions = [PHImageRequestOptions new];
             requestOptions.networkAccessAllowed = allowNetworkAccess;
             requestOptions.version = PHImageRequestOptionsVersionCurrent;
@@ -1275,8 +1303,6 @@ RCT_EXPORT_METHOD(getPhotoThumbnail:(NSString *)internalId
                     return;
                 }
 
-                NSString *thumbnailFilename = [NSString stringWithFormat:@"RNCCameraRoll-thumbnail-%@.jpg", [NSUUID UUID].UUIDString];
-                NSString *thumbnailPath = [NSTemporaryDirectory() stringByAppendingPathComponent:thumbnailFilename];
                 NSError *writeError = nil;
                 BOOL didWrite = [thumbnailData writeToFile:thumbnailPath options:NSDataWritingAtomic error:&writeError];
                 if (!didWrite) {
@@ -1339,6 +1365,40 @@ NSString *subTypeLabelForCollection(PHAssetCollection *assetCollection) {
 - (BOOL)isLivePhotoAsset:(PHAsset *)asset {
     return asset.mediaType == PHAssetMediaTypeImage &&
       (asset.mediaSubtypes & PHAssetMediaSubtypePhotoLive) == PHAssetMediaSubtypePhotoLive;
+}
+
+// 获取相册缩略图缓存目录，优先使用业务传入的缓存目录，设置页清除缓存时会释放。
+- (NSString *)thumbnailCacheDirectory:(NSString *)cacheDirectory {
+    if (cacheDirectory.length > 0) {
+        return cacheDirectory;
+    }
+
+    NSArray<NSURL *> *cacheURLs = [[NSFileManager defaultManager] URLsForDirectory:NSCachesDirectory
+                                                                         inDomains:NSUserDomainMask];
+    NSString *cachePath = cacheURLs.firstObject.path ?: NSTemporaryDirectory();
+    return [cachePath stringByAppendingPathComponent:@"RNCCameraRollThumbnails"];
+}
+
+// 生成相册缩略图缓存 key，修改时间变化时视为新版本。
+- (NSString *)thumbnailCacheKeyForAsset:(PHAsset *)asset {
+    return [NSString stringWithFormat:@"%@_%.0f",
+            asset.localIdentifier,
+            asset.modificationDate.timeIntervalSince1970];
+}
+
+// 转换文件名中的特殊字符，避免 asset identifier 中的分隔符影响路径。
+- (NSString *)safeThumbnailCacheKey:(NSString *)cacheKey {
+    NSCharacterSet *allowedCharacterSet = [NSCharacterSet characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_."];
+    NSMutableString *safeKey = [NSMutableString string];
+    for (NSUInteger index = 0; index < cacheKey.length; index++) {
+        unichar character = [cacheKey characterAtIndex:index];
+        if ([allowedCharacterSet characterIsMember:character]) {
+            [safeKey appendFormat:@"%C", character];
+        } else {
+            [safeKey appendString:@"_"];
+        }
+    }
+    return safeKey.length > 0 ? safeKey : [NSUUID UUID].UUIDString;
 }
 
 - (NSString *)temporaryPathForAssetIdentifier:(NSString *)identifier

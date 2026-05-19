@@ -232,7 +232,9 @@ export type ThumbnailSize = {
 export type PhotoThumbnailOptions = {
   allowNetworkAccess: boolean,  //iOS only
   targetSize: ThumbnailSize,
-  quality: number
+  quality: number,
+  cacheDirectory?: string,
+  cacheKey?: string
 };
 
 export type PhotoThumbnail = {
