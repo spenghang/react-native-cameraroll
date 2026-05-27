@@ -174,6 +174,7 @@ RCT_EXPORT_METHOD(saveToCameraRoll:(NSURLRequest *)request
       PHAssetChangeRequest *assetRequest ;
       if ([options[@"type"] isEqualToString:@"video"]) {
         assetRequest = [PHAssetChangeRequest creationRequestForAssetFromVideoAtFileURL:inputURI];
+        assetRequest.creationDate = [NSDate date];
       } else if ([[inputURI.pathExtension lowercaseString] isEqualToString:@"gif"]) {
         NSData *data = [NSData dataWithContentsOfURL:inputURI];
         PHAssetCreationRequest *request = [PHAssetCreationRequest creationRequestForAsset];
