@@ -4,15 +4,18 @@ import NativeModule from '../NativeCameraRollModule';
 
 let mockDeletePhotos: jest.Mock;
 let mockSaveToCameraRoll: jest.Mock;
+let mockSaveLivePhoto: jest.Mock;
 let mockGetPhotos: jest.Mock;
 
 jest.mock('../NativeCameraRollModule', () => {
   mockDeletePhotos = jest.fn();
   mockSaveToCameraRoll = jest.fn();
+  mockSaveLivePhoto = jest.fn();
   mockGetPhotos = jest.fn();
   return {
     deletePhotos: mockDeletePhotos,
     saveToCameraRoll: mockSaveToCameraRoll,
+    saveLivePhoto: mockSaveLivePhoto,
     getPhotos: mockGetPhotos,
   };
 });
@@ -36,6 +39,17 @@ describe('CameraRoll', () => {
     await CameraRoll.save('a tag', {type: 'photo'});
     expect(
       (NativeModule.saveToCameraRoll as jest.Mock).mock.calls,
+    ).toMatchSnapshot();
+  });
+
+  it('Should call saveLivePhoto', async () => {
+    await CameraRoll.saveLivePhoto({
+      imageUri: 'an image uri',
+      videoUri: 'a video uri',
+      stillImageTime: 0,
+    });
+    expect(
+      (NativeModule.saveLivePhoto as jest.Mock).mock.calls,
     ).toMatchSnapshot();
   });
 

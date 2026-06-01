@@ -34,6 +34,20 @@ Array [
 ]
 `;
 
+exports[`CameraRoll Should call saveLivePhoto 1`] = `
+Array [
+  Array [
+    Object {
+      "album": "",
+      "imageUri": "an image uri",
+      "stillImageTime": 0,
+      "title": "",
+      "videoUri": "a video uri",
+    },
+  ],
+]
+`;
+
 exports[`CameraRoll Should call saveToCameraRoll 1`] = `
 Array [
   Array [

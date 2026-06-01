@@ -199,6 +199,11 @@ export type SaveLivePhotoOptions = {
   album?: string;
   /** Optional output filename (without extension). Android only. */
   title?: string;
+  /**
+   * Optional `com.apple.quicktime.still-image-time` timestamp in milliseconds.
+   * iOS only; defaults to 0.
+   */
+  stillImageTime?: number;
 };
 
 export type GetAlbumsParams = {
@@ -311,11 +316,27 @@ export class CameraRoll {
    * Android: content / file URI).
    */
   static saveLivePhoto(options: SaveLivePhotoOptions): Promise<string> {
-    if (!options || !options.imageUri || !options.videoUri) {
+    const saveOptions = options as SaveLivePhotoOptions | null | undefined;
+    if (
+      saveOptions == null ||
+      saveOptions.imageUri.length === 0 ||
+      saveOptions.videoUri.length === 0
+    )
       throw new Error('saveLivePhoto requires both imageUri and videoUri');
-    }
-    const {imageUri, videoUri, album = '', title = ''} = options;
-    return RNCCameraRoll.saveLivePhoto({imageUri, videoUri, album, title});
+
+    const {
+      imageUri,
+      videoUri,
+      album = '',
+      title = '',
+      stillImageTime,
+    } = saveOptions;
+    const nativeOptions = {imageUri, videoUri, album, title};
+    return RNCCameraRoll.saveLivePhoto(
+      stillImageTime == null
+        ? nativeOptions
+        : {...nativeOptions, stillImageTime},
+    );
   }
 
   static getAlbums(

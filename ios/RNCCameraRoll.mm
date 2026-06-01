@@ -360,7 +360,8 @@ static NSString *const kLivePhotoStillImageTimeKey = @"com.apple.quicktime.still
   AVMutableMetadataItem *item = [AVMutableMetadataItem metadataItem];
   item.keySpace = AVMetadataKeySpaceQuickTimeMetadata;
   item.key = kLivePhotoStillImageTimeKey;
-  // Apple uses a signed 8-bit value of 0xFF (-1) here.
+  // Apple uses a signed 8-bit value of 0xFF (-1) here; the timestamp is carried
+  // by the timed metadata group's time range.
   item.value = @(-1);
   item.dataType = (__bridge NSString *)kCMMetadataBaseDataType_SInt8;
   return item;
@@ -368,6 +369,7 @@ static NSString *const kLivePhotoStillImageTimeKey = @"com.apple.quicktime.still
 
 + (BOOL)rnc_writeLivePhotoVideo:(NSURL *)sourceURL
                 assetIdentifier:(NSString *)assetIdentifier
+                stillImageTimeMs:(NSNumber *)stillImageTimeMs
                       outputURL:(NSURL *)outputURL
                           error:(NSError **)error
 {
@@ -488,11 +490,13 @@ static NSString *const kLivePhotoStillImageTimeKey = @"com.apple.quicktime.still
   }
   [writer startSessionAtSourceTime:kCMTimeZero];
 
-  // Append the still-image-time metadata right at the start.
+  // Append the still-image-time metadata at the requested still frame timestamp.
   if (metadataAdaptor) {
-    CMTimeRange range = CMTimeRangeMake(kCMTimeZero, CMTimeMake(1, 100));
-    AVTimedMetadataGroup *group = [[AVTimedMetadataGroup alloc] initWithItems:@[[self rnc_stillImageTimeMetadataItem]]
-                                                                     timeRange:range];
+    CMTime startTime = CMTimeMake([stillImageTimeMs longLongValue], 1000);
+    CMTimeRange range = CMTimeRangeMake(startTime, CMTimeMake(1, 100));
+    AVMutableMetadataItem *stillImageTimeItem = [self rnc_stillImageTimeMetadataItem];
+    AVTimedMetadataGroup *group = [[AVTimedMetadataGroup alloc] initWithItems:@[stillImageTimeItem]
+                                                                    timeRange:range];
     [metadataAdaptor appendTimedMetadataGroup:group];
     [metadataInput markAsFinished];
   }
@@ -583,6 +587,18 @@ RCT_EXPORT_METHOD(saveLivePhoto:(NSDictionary *)options
   NSString *imageUriStr = [RCTConvert NSString:options[@"imageUri"]];
   NSString *videoUriStr = [RCTConvert NSString:options[@"videoUri"]];
   NSString *album = [RCTConvert NSString:options[@"album"]];
+  NSNumber *stillImageTimeMs = @(0);
+  id stillImageTimeOption = options[@"stillImageTime"];
+  if (stillImageTimeOption != nil && stillImageTimeOption != [NSNull null]) {
+    stillImageTimeMs = [RCTConvert NSNumber:stillImageTimeOption];
+    long long stillImageTimeValue = [stillImageTimeMs longLongValue];
+    if (stillImageTimeMs == nil
+        || [stillImageTimeMs doubleValue] != (double)stillImageTimeValue
+        || stillImageTimeValue < 0) {
+      reject(kErrorUnableToSave, @"stillImageTime must be a non-negative integer in milliseconds", nil);
+      return;
+    }
+  }
 
   if (imageUriStr.length == 0 || videoUriStr.length == 0) {
     reject(kErrorUnableToSave, @"saveLivePhoto requires both imageUri and videoUri", nil);
@@ -625,6 +641,7 @@ RCT_EXPORT_METHOD(saveLivePhoto:(NSDictionary *)options
       NSError *videoError = nil;
       if (![RNCCameraRoll rnc_writeLivePhotoVideo:videoURL
                                   assetIdentifier:assetIdentifier
+                                 stillImageTimeMs:stillImageTimeMs
                                         outputURL:tempVideoURL
                                             error:&videoError]) {
         [[NSFileManager defaultManager] removeItemAtURL:tempImageURL error:nil];
