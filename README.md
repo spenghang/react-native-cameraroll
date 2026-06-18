@@ -250,7 +250,7 @@ Returns a Promise with photo identifier objects from the local camera roll of th
   * `SavedPhotos`
 * `groupName` : {string} : Specifies filter on group names, like 'Recent Photos' or custom album titles.
 * `includeSharedAlbums` : {boolean} : Include assets originating from an iCloud Shared Album. iOS only.
-* `assetType` : {string} : Specifies filter on asset type. Valid values are:
+* `assetType` : {string | Array<string>} : Specifies filter on asset type. Pass an array to include multiple types. Valid values are:
   * `All`
   * `Videos`
   * `Photos` // default

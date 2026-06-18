@@ -62,6 +62,9 @@ export type Include =
 
 export type AssetType = 'All' | 'Videos' | 'Photos';
 export type GetPhotosAssetType = AssetType | 'Live';
+export type GetPhotosAssetTypes =
+  | GetPhotosAssetType
+  | ReadonlyArray<GetPhotosAssetType>;
 
 export type AlbumType = 'All' | 'Album' | 'SmartAlbum';
 
@@ -98,9 +101,10 @@ export type GetPhotosParams = {
   includeSharedAlbums?: boolean;
 
   /**
-   * Specifies filter on asset type. `Live` returns only Live Photos / Motion Photos.
+   * Specifies filter on asset type. Pass an array to include multiple types.
+   * `Live` returns only Live Photos / Motion Photos.
    */
-  assetType?: GetPhotosAssetType;
+  assetType?: GetPhotosAssetTypes;
 
   /**
    * Detect Live Photos / Motion Photos in regular results. Android only.

@@ -36,6 +36,7 @@ import com.facebook.react.bridge.ReactContext;
 import com.facebook.react.bridge.ReactMethod;
 import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.bridge.ReadableMap;
+import com.facebook.react.bridge.ReadableType;
 import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.bridge.WritableNativeArray;
@@ -105,6 +106,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
 
   private static final String[] BASE_PROJECTION = {
           Images.Media._ID,
+          MediaStore.Files.FileColumns.MEDIA_TYPE,
           Images.Media.MIME_TYPE,
           Images.Media.BUCKET_DISPLAY_NAME,
           Images.Media.DATE_TAKEN,
@@ -119,6 +121,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
 
   private static final String[] PROJECTION_WITH_XMP = {
           Images.Media._ID,
+          MediaStore.Files.FileColumns.MEDIA_TYPE,
           Images.Media.MIME_TYPE,
           Images.Media.BUCKET_DISPLAY_NAME,
           Images.Media.DATE_TAKEN,
@@ -1167,6 +1170,43 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     }
   }
 
+  private static Set<String> getAssetTypesFromParams(
+          final ReadableMap params,
+          final String key,
+          final String defaultAssetType) {
+    Set<String> assetTypes = new HashSet<>();
+
+    if (!params.hasKey(key) || params.isNull(key)) {
+      assetTypes.add(defaultAssetType);
+      return assetTypes;
+    }
+
+    if (params.getType(key) == ReadableType.Array) {
+      ReadableArray assetTypeArray = params.getArray(key);
+      if (assetTypeArray != null) {
+        for (int i = 0; i < assetTypeArray.size(); i++) {
+          if (assetTypeArray.getType(i) == ReadableType.String) {
+            @Nullable String assetType = assetTypeArray.getString(i);
+            if (!TextUtils.isEmpty(assetType)) {
+              assetTypes.add(assetType);
+            }
+          }
+        }
+      }
+    } else if (params.getType(key) == ReadableType.String) {
+      @Nullable String assetType = params.getString(key);
+      if (!TextUtils.isEmpty(assetType)) {
+        assetTypes.add(assetType);
+      }
+    }
+
+    if (assetTypes.isEmpty()) {
+      assetTypes.add(defaultAssetType);
+    }
+
+    return assetTypes;
+  }
+
   /**
    * Get photos from {@link MediaStore.Images}, most recent first.
    *
@@ -1184,7 +1224,8 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
    *                  </li>
    *                  <li>
    *                    assetType (optional): chooses between photos, videos, or live photos from
-   *                    the camera roll. Valid values are "Photos", "Videos", or "Live".
+   *                    the camera roll. Valid values are "Photos", "Videos", "Live", "All", or
+   *                    an array of those values.
    *                    Defaults to photos.
    *                  </li>
    *                  <li>
@@ -1200,7 +1241,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     int first = params.getInt("first");
     String after = params.hasKey("after") ? params.getString("after") : null;
     String groupName = params.hasKey("groupName") ? params.getString("groupName") : null;
-    String assetType = params.hasKey("assetType") ? params.getString("assetType") : ASSET_TYPE_PHOTOS;
+    Set<String> assetTypes = getAssetTypesFromParams(params, "assetType", ASSET_TYPE_PHOTOS);
     long fromTime = params.hasKey("fromTime") ? (long) params.getDouble("fromTime") : 0;
     long toTime = params.hasKey("toTime") ? (long) params.getDouble("toTime") : 0;
     ReadableArray mimeTypes = params.hasKey("mimeTypes")
@@ -1217,7 +1258,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
             after,
             groupName,
             mimeTypes,
-            assetType,
+            assetTypes,
             fromTime,
             toTime,
             include,
@@ -1236,7 +1277,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     private final @Nullable
     ReadableArray mMimeTypes;
     private final Promise mPromise;
-    private final String mAssetType;
+    private final Set<String> mAssetTypes;
     private final long mFromTime;
     private final long mToTime;
     private final Set<String> mInclude;
@@ -1248,7 +1289,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
             @Nullable String after,
             @Nullable String groupName,
             @Nullable ReadableArray mimeTypes,
-            String assetType,
+            Set<String> assetTypes,
             long fromTime,
             long toTime,
             @Nullable ReadableArray include,
@@ -1261,7 +1302,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
       mGroupName = groupName;
       mMimeTypes = mimeTypes;
       mPromise = promise;
-      mAssetType = assetType;
+      mAssetTypes = assetTypes;
       mFromTime = fromTime;
       mToTime = toTime;
       mInclude = createSetFromIncludeArray(include);
@@ -1289,26 +1330,48 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     protected void doInBackgroundGuarded(Void... params) {
       StringBuilder selection = new StringBuilder("1");
       List<String> selectionArgs = new ArrayList<>();
-      boolean isLivePhotosOnly = mAssetType.equals(ASSET_TYPE_LIVE);
+      for (String assetType : mAssetTypes) {
+        if (!assetType.equals(ASSET_TYPE_PHOTOS)
+                && !assetType.equals(ASSET_TYPE_VIDEOS)
+                && !assetType.equals(ASSET_TYPE_LIVE)
+                && !assetType.equals(ASSET_TYPE_ALL)) {
+          mPromise.reject(
+                  ERROR_UNABLE_TO_FILTER,
+                  "Invalid filter option: '" + assetType + "'. Expected one of '"
+                          + ASSET_TYPE_PHOTOS + "', '" + ASSET_TYPE_VIDEOS + "', '"
+                          + ASSET_TYPE_LIVE + "' or '" + ASSET_TYPE_ALL + "'."
+          );
+          return;
+        }
+      }
+
+      boolean includesAll = mAssetTypes.contains(ASSET_TYPE_ALL);
+      boolean includesImages = includesAll
+              || mAssetTypes.contains(ASSET_TYPE_PHOTOS)
+              || mAssetTypes.contains(ASSET_TYPE_LIVE);
+      boolean includesVideos = includesAll || mAssetTypes.contains(ASSET_TYPE_VIDEOS);
+      boolean filtersLivePhotos = mAssetTypes.contains(ASSET_TYPE_LIVE)
+              && !mAssetTypes.contains(ASSET_TYPE_PHOTOS)
+              && !includesAll;
       if (!TextUtils.isEmpty(mGroupName)) {
         selection.append(" AND " + SELECTION_BUCKET);
         selectionArgs.add(mGroupName);
       }
 
-      if (mAssetType.equals(ASSET_TYPE_PHOTOS) || isLivePhotosOnly) {
-        selection.append(" AND " + MediaStore.Files.FileColumns.MEDIA_TYPE + " = "
-                + MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE);
-      } else if (mAssetType.equals(ASSET_TYPE_VIDEOS)) {
-        selection.append(" AND " + MediaStore.Files.FileColumns.MEDIA_TYPE + " = "
-                + MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO);
-      } else if (mAssetType.equals(ASSET_TYPE_ALL)) {
+      if (includesImages && includesVideos) {
         selection.append(" AND " + MediaStore.Files.FileColumns.MEDIA_TYPE + " IN ("
                 + MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO + ","
                 + MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE + ")");
+      } else if (includesImages) {
+        selection.append(" AND " + MediaStore.Files.FileColumns.MEDIA_TYPE + " = "
+                + MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE);
+      } else if (includesVideos) {
+        selection.append(" AND " + MediaStore.Files.FileColumns.MEDIA_TYPE + " = "
+                + MediaStore.Files.FileColumns.MEDIA_TYPE_VIDEO);
       } else {
         mPromise.reject(
                 ERROR_UNABLE_TO_FILTER,
-                "Invalid filter option: '" + mAssetType + "'. Expected one of '"
+                "Invalid filter option: '" + mAssetTypes + "'. Expected one of '"
                         + ASSET_TYPE_PHOTOS + "', '" + ASSET_TYPE_VIDEOS + "', '"
                         + ASSET_TYPE_LIVE + "' or '" + ASSET_TYPE_ALL + "'."
         );
@@ -1351,10 +1414,10 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
           bundle.putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS,
                   selectionArgs.toArray(new String[selectionArgs.size()]));
           bundle.putString(ContentResolver.QUERY_ARG_SQL_SORT_ORDER, Images.Media.DATE_ADDED + " DESC, " + Images.Media.DATE_MODIFIED + " DESC");
-          if (!isLivePhotosOnly) {
+          if (!filtersLivePhotos) {
             bundle.putInt(ContentResolver.QUERY_ARG_LIMIT, mFirst + 1);
           }
-          if (!isLivePhotosOnly && !TextUtils.isEmpty(mAfter)) {
+          if (!filtersLivePhotos && !TextUtils.isEmpty(mAfter)) {
             bundle.putInt(ContentResolver.QUERY_ARG_OFFSET, Integer.parseInt(mAfter));
           }
           media = resolver.query(
@@ -1365,7 +1428,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
         } else {
           // set LIMIT to first + 1 so that we know how to populate page_info
           Uri mediaStoreUri = MediaStore.Files.getContentUri("external");
-          if (!isLivePhotosOnly) {
+          if (!filtersLivePhotos) {
             String limit = "limit=" + (mFirst + 1);
             if (!TextUtils.isEmpty(mAfter)) {
               limit = "limit=" + mAfter + "," + (mFirst + 1);
@@ -1384,9 +1447,9 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
           mPromise.reject(ERROR_UNABLE_TO_LOAD, "Could not get media");
         } else {
           try {
-            if (isLivePhotosOnly) {
+            if (filtersLivePhotos) {
               int offset = !TextUtils.isEmpty(mAfter) ? Integer.parseInt(mAfter) : 0;
-              putLivePhotoEdges(resolver, media, response, mFirst, mInclude, offset);
+              putLiveFilteredEdges(resolver, media, response, mFirst, mInclude, offset);
             } else {
               putEdges(resolver, media, response, mFirst, mInclude, mDetectLivePhoto);
               putPageInfo(media, response, mFirst, !TextUtils.isEmpty(mAfter) ? Integer.parseInt(mAfter) : 0);
@@ -1566,7 +1629,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     response.putArray("edges", edges);
   }
 
-  private static void putLivePhotoEdges(
+  private static void putLiveFilteredEdges(
           ContentResolver resolver,
           Cursor media,
           WritableMap response,
@@ -1598,12 +1661,24 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
     boolean hasNextPage = false;
     @Nullable String endCursor = null;
     int collected = 0;
+    int mediaTypeIndex = media.getColumnIndex(MediaStore.Files.FileColumns.MEDIA_TYPE);
 
     do {
-      if (isMotionPhotoAssetFromFastMetadata(
-              media.getString(dataIndex),
-              media.getString(mimeTypeIndex),
-              getMotionPhotoMetadataFromCursor(media, xmpIndex))) {
+      String currentPath = media.getString(dataIndex);
+      String currentMime = media.getString(mimeTypeIndex);
+      boolean isImage = mediaTypeIndex >= 0
+              ? media.getInt(mediaTypeIndex) == MediaStore.Files.FileColumns.MEDIA_TYPE_IMAGE
+              : currentMime != null && currentMime.startsWith("image");
+      boolean isLivePhoto = isMotionPhotoAssetFromFastMetadata(
+              currentPath,
+              currentMime,
+              getMotionPhotoMetadataFromCursor(media, xmpIndex));
+
+      if (isVivoCompanionVideo(currentPath, currentMime)) {
+        continue;
+      }
+
+      if (!isImage || isLivePhoto) {
         if (collected == limit) {
           hasNextPage = true;
           endCursor = Integer.toString(media.getPosition());
@@ -1619,7 +1694,7 @@ public class CameraRollModule extends NativeCameraRollModuleSpec {
                         include.contains(INCLUDE_PLAYABLE_DURATION), include.contains(INCLUDE_ORIENTATION));
         if (imageInfoSuccess) {
           putBasicNodeInfo(media, node, idIndex, mimeTypeIndex, groupNameIndex, dateTakenIndex, dateAddedIndex,
-                  dateModifiedIndex, include.contains(INCLUDE_ALBUMS), true);
+                  dateModifiedIndex, include.contains(INCLUDE_ALBUMS), isLivePhoto);
           putLocationInfo(media, node, dataIndex, include.contains(INCLUDE_LOCATION), mimeTypeIndex, resolver);
 
           edge.putMap("node", node);

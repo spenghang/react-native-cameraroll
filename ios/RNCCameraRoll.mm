@@ -30,6 +30,41 @@
   #define SD_WEB_IMAGE_WEBP_CODER_AVAILABLE 1
 #endif
 
+static NSArray<NSString *> *RCTMediaTypesFromAssetType(id assetType, NSString *defaultMediaType)
+{
+  NSMutableArray<NSString *> *mediaTypes = [NSMutableArray new];
+
+  if ([assetType isKindOfClass:[NSArray class]]) {
+    for (id mediaType in (NSArray *)assetType) {
+      NSString *const convertedMediaType = [RCTConvert NSString:mediaType];
+      if (convertedMediaType.length > 0) {
+        [mediaTypes addObject:convertedMediaType];
+      }
+    }
+  } else {
+    NSString *const convertedMediaType = [RCTConvert NSString:assetType];
+    if (convertedMediaType.length > 0) {
+      [mediaTypes addObject:convertedMediaType];
+    }
+  }
+
+  if (mediaTypes.count == 0) {
+    [mediaTypes addObject:defaultMediaType];
+  }
+
+  return mediaTypes;
+}
+
+static NSSet<NSString *> *RCTLowercaseMediaTypes(NSArray<NSString *> *mediaTypes)
+{
+  NSMutableSet<NSString *> *lowercaseMediaTypes = [NSMutableSet new];
+  for (NSString *mediaType in mediaTypes) {
+    [lowercaseMediaTypes addObject:[mediaType lowercaseString]];
+  }
+
+  return lowercaseMediaTypes;
+}
+
 @implementation RCTConvert (PHAssetCollectionSubtype)
 
 RCT_ENUM_CONVERTER(PHAssetCollectionSubtype, (@{
@@ -49,29 +84,41 @@ RCT_ENUM_CONVERTER(PHAssetCollectionSubtype, (@{
 
 @implementation RCTConvert (PHFetchOptions)
 
-+ (PHFetchOptions *)PHFetchOptionsFromMediaType:(NSString *)mediaType
-                                       fromTime:(NSUInteger)fromTime
-                                         toTime:(NSUInteger)toTime
++ (PHFetchOptions *)PHFetchOptionsFromMediaTypes:(NSArray<NSString *> *)mediaTypes
+                                        fromTime:(NSUInteger)fromTime
+                                          toTime:(NSUInteger)toTime
 {
   // This is not exhaustive in terms of supported media type predicates; more can be added in the future
-  NSString *const lowercase = [mediaType lowercaseString];
+  NSSet<NSString *> *const lowercaseMediaTypes = RCTLowercaseMediaTypes(mediaTypes);
   NSMutableArray *format = [NSMutableArray new];
   NSMutableArray *arguments = [NSMutableArray new];
 
-  if ([lowercase isEqualToString:@"photos"]) {
-    [format addObject:@"mediaType = %d"];
-    [arguments addObject:@(PHAssetMediaTypeImage)];
-  } else if ([lowercase isEqualToString:@"live"]) {
-    [format addObject:@"mediaType = %d"];
-    [arguments addObject:@(PHAssetMediaTypeImage)];
-  } else if ([lowercase isEqualToString:@"videos"]) {
-    [format addObject:@"mediaType = %d"];
-    [arguments addObject:@(PHAssetMediaTypeVideo)];
-  } else {
-    if (![lowercase isEqualToString:@"all"]) {
+  BOOL const includesAll = [lowercaseMediaTypes containsObject:@"all"];
+  BOOL const includesImages = includesAll ||
+    [lowercaseMediaTypes containsObject:@"photos"] ||
+    [lowercaseMediaTypes containsObject:@"live"];
+  BOOL const includesVideos = includesAll ||
+    [lowercaseMediaTypes containsObject:@"videos"];
+
+  for (NSString *mediaType in lowercaseMediaTypes) {
+    if (![mediaType isEqualToString:@"photos"] &&
+        ![mediaType isEqualToString:@"live"] &&
+        ![mediaType isEqualToString:@"videos"] &&
+        ![mediaType isEqualToString:@"all"]) {
       RCTLogError(@"Invalid filter option: '%@'. Expected one of 'photos',"
                   "'live', 'videos' or 'all'.", mediaType);
     }
+  }
+
+  if (includesImages && includesVideos) {
+    [format addObject:@"mediaType IN %@"];
+    [arguments addObject:@[@(PHAssetMediaTypeImage), @(PHAssetMediaTypeVideo)]];
+  } else if (includesImages) {
+    [format addObject:@"mediaType = %d"];
+    [arguments addObject:@(PHAssetMediaTypeImage)];
+  } else if (includesVideos) {
+    [format addObject:@"mediaType = %d"];
+    [arguments addObject:@(PHAssetMediaTypeVideo)];
   }
 
   if (fromTime > 0) {
@@ -91,6 +138,15 @@ RCT_ENUM_CONVERTER(PHAssetCollectionSubtype, (@{
     options.predicate = [NSPredicate predicateWithFormat:[format componentsJoinedByString:@" AND "] argumentArray:arguments];
   }
   return options;
+}
+
++ (PHFetchOptions *)PHFetchOptionsFromMediaType:(NSString *)mediaType
+                                       fromTime:(NSUInteger)fromTime
+                                         toTime:(NSUInteger)toTime
+{
+  return [self PHFetchOptionsFromMediaTypes:RCTMediaTypesFromAssetType(mediaType, @"All")
+                                   fromTime:fromTime
+                                     toTime:toTime];
 }
 
 @end
@@ -804,12 +860,15 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
   NSString *const afterCursor = [RCTConvert NSString:params[@"after"]];
   NSString *const groupName = [RCTConvert NSString:params[@"groupName"]];
   NSString *const groupTypes = [[RCTConvert NSString:params[@"groupTypes"]] lowercaseString];
-  NSString *const mediaType = [[RCTConvert NSString:params[@"assetType"]] lowercaseString];
+  NSArray<NSString *> *const mediaTypes = RCTMediaTypesFromAssetType(params[@"assetType"], @"All");
+  NSSet<NSString *> *const lowercaseMediaTypes = RCTLowercaseMediaTypes(mediaTypes);
   NSUInteger const fromTime = [RCTConvert NSInteger:params[@"fromTime"]];
   NSUInteger const toTime = [RCTConvert NSInteger:params[@"toTime"]];
   NSArray<NSString *> *const mimeTypes = [RCTConvert NSStringArray:params[@"mimeTypes"]];
   NSArray<NSString *> *const include = [RCTConvert NSStringArray:params[@"include"]];
-  BOOL const isLivePhotoOnly = [mediaType isEqualToString:@"live"];
+  BOOL const filtersLivePhotos = [lowercaseMediaTypes containsObject:@"live"] &&
+    ![lowercaseMediaTypes containsObject:@"photos"] &&
+    ![lowercaseMediaTypes containsObject:@"all"];
 
   BOOL __block includeSharedAlbums = [params[@"includeSharedAlbums"] boolValue];
 
@@ -822,10 +881,10 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
   BOOL __block includeAlbums = [include indexOfObject:@"albums"] != NSNotFound;
 
   // Predicate for fetching assets within a collection
-  PHFetchOptions *const assetFetchOptions = [RCTConvert PHFetchOptionsFromMediaType:mediaType fromTime:fromTime toTime:toTime];
+  PHFetchOptions *const assetFetchOptions = [RCTConvert PHFetchOptionsFromMediaTypes:mediaTypes fromTime:fromTime toTime:toTime];
   // We can directly set the limit if we guarantee every image fetched will be
   // added to the output array within the `collectAsset` block
-  BOOL collectAssetMayOmitAsset = !!afterCursor || [mimeTypes count] > 0 || isLivePhotoOnly;
+  BOOL collectAssetMayOmitAsset = !!afterCursor || [mimeTypes count] > 0 || filtersLivePhotos;
   if (!collectAssetMayOmitAsset) {
     // We set the fetchLimit to first + 1 so that `hasNextPage` will be set
     // correctly:
@@ -859,7 +918,7 @@ RCT_EXPORT_METHOD(getPhotos:(NSDictionary *)params
               return;
           }
 
-          if (isLivePhotoOnly && ![self isLivePhotoAsset:asset]) {
+          if (filtersLivePhotos && asset.mediaType == PHAssetMediaTypeImage && ![self isLivePhotoAsset:asset]) {
               return;
           }
 
